@@ -1,7 +1,5 @@
 package io.github.aumt.daedtile;
 
-import android.content.Intent;
-import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.service.quicksettings.Tile;
@@ -9,8 +7,11 @@ import android.service.quicksettings.TileService;
 
 /**
  * Quick Settings tile for daed:
- *   tap        -> toggle the dae proxy on/off (the daed web UI keeps running)
- *   long-press -> open the daed web UI
+ *   tap -> toggle the dae proxy on/off (the daed web UI keeps running)
+ *
+ * Long-press has no onLongClick hook in TileService: Android shows the
+ * system's tile-detail sheet instead, which exposes a gear entry into the
+ * QS_TILE_PREFERENCES activity (MainActivity) that opens the web UI.
  *
  * Installed as a system app from the Magisk module. The first tap prompts the
  * Magisk superuser grant dialog; allow it once and the tile works silently.
@@ -62,14 +63,6 @@ public class DaedTileService extends TileService {
                 }
             });
         }, "DaedToggle").start();
-    }
-
-    @Override
-    public void onLongClick() {
-        // Open the daed web UI. (If the OEM intercepts the long-press, the
-        // launcher activity also offers "Open web UI".)
-        startActivityAndCollapse(new Intent(Intent.ACTION_VIEW, Uri.parse(Daedctl.WEBUI_URL))
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
     }
 
     private void refresh() {

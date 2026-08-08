@@ -11,7 +11,8 @@
         android:icon="@drawable/ic_tile"
         android:allowBackup="false">
 
-        <!-- Launcher entry: shows daed status and how to add the tile. -->
+        <!-- Launcher entry + QS tile detail entry (the gear shown on
+             long-press): shows daed status and opens the web UI. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
@@ -19,6 +20,9 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
         </activity>
 

@@ -3,8 +3,10 @@
 一个无 Gradle 依赖的 Android 快捷设置磁贴系统应用，用于快捷控制 daed：
 
 - **点按磁贴**：开启 / 关闭 **dae 代理**（daed WebUI 服务保持运行）
-- **长按磁贴**：打开 WebUI `http://127.0.0.1:2023`
+- **长按磁贴**：呼出系统磁贴详情面板，点齿轮（⚙）打开 WebUI `http://127.0.0.1:2023`
 - 磁贴状态实时反映代理运行状态
+
+> Android 的 `TileService` 无 `onLongClick` 钩子：长按磁贴由 SystemUI 展示详情面板。本模块通过 `QS_TILE_PREFERENCES` intent 把详情面板的齿轮入口指向主界面（自动打开 WebUI），这是原生框架下最接近"长按开 WebUI"的实现。
 
 通过 Magisk 模块以系统应用形式安装到 `system/app/DaedTile/DaedTile.apk`。
 
@@ -35,7 +37,7 @@ res/                         strings / 图标
 
 脚本只依赖 **JDK** 与 **Android SDK build-tools + platform**，不需要 Gradle。
 
-在 droidspaces Debian 容器中（或任何 Linux 环境）：
+在任何 Linux 环境（含 CI 的 Debian runner）中：
 
 ```bash
 # 1. 准备 SDK（示例：apt 安装 commandlinetools 后自动下载，或复用 CI 缓存）
@@ -51,5 +53,5 @@ bash android/tile/build-apk.sh
 
 ## 注意
 
-- 本目录不在 Windows 本机构建，只写源码，构建在 droidspaces 容器与 CI 完成。
+- 本目录不在 Windows 本机构建，只写源码，构建由 CI 与本地 Linux 环境完成。
 - `build/` 为构建产物目录，已被 `.gitignore` 排除。

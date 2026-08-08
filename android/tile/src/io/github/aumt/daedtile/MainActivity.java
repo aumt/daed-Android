@@ -24,6 +24,15 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
+        // Long-pressing the QS tile shows the system tile-detail sheet; its
+        // gear entry launches this activity via QS_TILE_PREFERENCES. Open the
+        // web UI right away so the long-press path lands on the panel.
+        if (TileService.ACTION_QS_TILE_PREFERENCES.equals(getIntent().getAction())) {
+            openWeb();
+            finish();
+            return;
+        }
+
         // Ask the system to (re)listen to the tile so its state refreshes.
         try {
             TileService.requestListeningState(this,

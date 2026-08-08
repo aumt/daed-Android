@@ -2,7 +2,7 @@
 #
 # Build the daed Quick-Settings tile APK using only Android SDK build-tools
 # (no Gradle / AGP). Runs on the GitHub Actions runner (Android SDK is
-# preinstalled) and in the droidspaces Debian container for local builds.
+# preinstalled) and on any Linux machine with an Android SDK + JDK.
 #
 # Requirements: a JDK (javac/keytool/java) and an Android SDK with build-tools
 # and a platform (android.jar). The SDK is located via ANDROID_SDK_ROOT /
