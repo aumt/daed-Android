@@ -1,0 +1,50 @@
+diff --git a/control/control_plane_core.go b/control/control_plane_core.go
+index ee1d102..5de638e 100644
+--- a/control/control_plane_core.go
++++ b/control/control_plane_core.go
+@@ -13,6 +13,8 @@ import (
+ 	"net/netip"
+ 	"os"
+ 	"regexp"
++	"strconv"
++	"strings"
+ 	"sync"
+ 	"sync/atomic"
+ 
+@@ -351,12 +353,36 @@ func (c *controlPlaneCore) linkHdrLen(ifname string) (uint32, error) {
+ 	case "ether":
+ 		linkHdrLen = consts.LinkHdrLen_Ethernet
+ 	default:
++		// ARPHRD_RAWIP (519) interfaces, e.g. Android cellular RmNet devices,
++		// carry no Ethernet header: skb data starts directly at the IP header.
++		// netlink reports their EncapType as "unknown519", so detect the ARPHRD
++		// type via sysfs and use link-header-less (L3) programs; otherwise the
++		// Ethernet offset misparses every packet's IP header as an EtherType
++		// and no traffic is intercepted.
++		if isRawIPInterface(ifname) {
++			linkHdrLen = consts.LinkHdrLen_None
++			break
++		}
+ 		c.log.Warnf("Maybe unsupported link type %v, using default link header length", link.Attrs().EncapType)
+ 		linkHdrLen = consts.LinkHdrLen_Ethernet
+ 	}
+ 	return linkHdrLen, nil
+ }
+ 
++// isRawIPInterface reports whether the interface's ARPHRD type is RAWIP (519),
++// i.e. a link with no L2 header such as Android's cellular RmNet devices.
++func isRawIPInterface(ifname string) bool {
++	b, err := os.ReadFile("/sys/class/net/" + ifname + "/type")
++	if err != nil {
++		return false
++	}
++	typ, err := strconv.Atoi(strings.TrimSpace(string(b)))
++	if err != nil {
++		return false
++	}
++	return typ == int(unix.ARPHRD_RAWIP)
++}
++
+ func buildClsactQdisc(link netlink.Link) *netlink.GenericQdisc {
+ 	return &netlink.GenericQdisc{
+ 		QdiscAttrs: netlink.QdiscAttrs{

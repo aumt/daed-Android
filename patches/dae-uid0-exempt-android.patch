@@ -1,0 +1,22 @@
+diff --git a/control/kern/tproxy.c b/control/kern/tproxy.c
+index 4525f17..319b44c 100644
+--- a/control/kern/tproxy.c
++++ b/control/kern/tproxy.c
+@@ -3063,6 +3063,17 @@ static __noinline int do_tproxy_wan_egress(struct __sk_buff *skb, u32 link_h_len
+ 	if (skb->ingress_ifindex != NOWHERE_IFINDEX)
+ 		return TC_ACT_OK;
+ 
++	// Bypass root-owned sockets (uid 0). dae's own control-plane dial-outs
++	// (health-check SYNs, DNS upstream, node tunnel connections) all run as
++	// root (daed starts as uid 0), and they must NOT be captured by the WAN
++	// egress proxy path: the health-check SYN that drives
++	// wan_outbound_is_alive() would be routed to "proxy", find the outbound
++	// not alive yet, and be dropped — a self-deadlock that keeps the proxy
++	// permanently dead. User apps run under normal uids (10000+) and are
++	// unaffected.
++	if (bpf_get_socket_uid(skb) == 0)
++		return TC_ACT_OK;
++
+ 	// Use per-CPU scratch map to avoid stack overflow (512-byte limit).
+ 	__u32 scratch_key = 0;
+ 	struct wan_egress_parsed *pkt =

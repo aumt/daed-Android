@@ -1,0 +1,90 @@
+diff --git a/common/utils.go b/common/utils.go
+index 50367db..f375a39 100644
+--- a/common/utils.go
++++ b/common/utils.go
+@@ -395,38 +395,48 @@ func GetDefaultIfnames() (defaultIfs []string, err error) {
+ 	if err != nil {
+ 		return nil, err
+ 	}
+-nextLink:
++	// Map link index to name, skipping interfaces that are down.
++	linkName := make(map[int]string, len(linkList))
+ 	for _, link := range linkList {
+ 		if link.Attrs().Flags&unix.RTF_UP != unix.RTF_UP {
+ 			// Interface is down.
+ 			continue
+ 		}
+-		for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
+-			rs, err := netlink.RouteList(link, family)
+-			if err != nil {
+-				return nil, err
++		linkName[link.Attrs().Index] = link.Attrs().Name
++	}
++	for _, family := range []int{unix.AF_INET, unix.AF_INET6} {
++		// Dump routes from ALL routing tables ("ip route show table all").
++		// On Android netd keeps the default route in a per-network table
++		// (e.g. rmnet_data3/wlan0) referenced by an ip rule, not in the main
++		// table, so the per-link main-table lookup below would find nothing.
++		rs, err := netlink.RouteListFiltered(family, &netlink.Route{Table: unix.RT_TABLE_UNSPEC}, netlink.RT_FILTER_TABLE)
++		if err != nil {
++			return nil, err
++		}
++		for _, route := range rs {
++			ifname, ok := linkName[route.LinkIndex]
++			if !ok {
++				// Interface is down or unknown.
++				continue
+ 			}
+-			for _, route := range rs {
+ 
+-				// In netlink v1.3.1+, default routes have Dst as 0.0.0.0/0 or ::/0
+-				// instead of nil (behavior change from v1.1.0).
+-				isDefault := false
+-				if route.Dst == nil {
+-					// Old behavior: nil Dst means default route
++			// In netlink v1.3.1+, default routes have Dst as 0.0.0.0/0 or ::/0
++			// instead of nil (behavior change from v1.1.0).
++			isDefault := false
++			if route.Dst == nil {
++				// Old behavior: nil Dst means default route
++				isDefault = true
++			} else if route.Dst.IP.IsUnspecified() && route.Dst.Mask != nil {
++				// New behavior: 0.0.0.0/0 or ::/0 means default route
++
++				ones, _ := route.Dst.Mask.Size()
++				if ones == 0 {
+ 					isDefault = true
+-				} else if route.Dst.IP.IsUnspecified() && route.Dst.Mask != nil {
+-					// New behavior: 0.0.0.0/0 or ::/0 means default route
+-
+-					ones, _ := route.Dst.Mask.Size()
+-					if ones == 0 {
+-						isDefault = true
+-					}
+ 				}
++			}
+ 
+-				if isDefault {
+-					defaultIfs = append(defaultIfs, link.Attrs().Name)
+-					continue nextLink
+-				}
++			if isDefault {
++				defaultIfs = append(defaultIfs, ifname)
+ 			}
+ 		}
+ 	}
+@@ -449,7 +459,13 @@ func MagicNetworkWithIPVersion(network string, mark uint32, mptcp bool, ipVersio
+ 	}.Encode()
+ }
+ 
+-const InternalSoMarkFromDae uint32 = 0x100
++// InternalSoMarkFromDae is the default socket mark dae applies to its own
++// outbound sockets when the user leaves so_mark_from_dae unset. On Android,
++// policy routing interprets fwmark bits as network-id (netid) hints: bit 16 set
++// (0x10000) selects the default network (netid 100), whereas 0x100 hits a
++// netd "unreachable" rule and every dae connection fails. Keep 0x10000 so the
++// auto-selected mark works on both Linux and Android.
++const InternalSoMarkFromDae uint32 = 0x10000
+ 
+ // EffectiveSoMarkFromDae returns the socket mark dae should use for its own
+ // outbound sockets. When the user leaves so_mark_from_dae unset, dae still
