@@ -81,6 +81,16 @@ jobs:
         run: |
           git apply ../../patches/dae-btf-android.patch
 
+      - name: Apply Android resolv.conf-free network check fix to dae-core
+        working-directory: wing/dae-core
+        run: |
+          git apply ../../patches/dae-checknetwork-android.patch
+
+      - name: Apply Android resolv.conf-free WaitForNetwork fix to dae-wing
+        working-directory: wing
+        run: |
+          git apply ../patches/dae-wing-checknetwork-android.patch
+
       - name: Build eBPF objects (arm64)
         working-directory: wing/dae-core
         run: |

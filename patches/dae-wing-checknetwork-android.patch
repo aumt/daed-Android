@@ -1,0 +1,74 @@
+diff --git a/dae/utils.go b/dae/utils.go
+index 65965a2..532c80f 100644
+--- a/dae/utils.go
++++ b/dae/utils.go
+@@ -11,15 +11,17 @@ import (
+ 	"fmt"
+ 	"net"
+ 	"net/http"
++	"net/netip"
+ 	"strings"
+ 	"time"
+ 
+ 	"github.com/daeuniverse/dae/cmd"
+ 	daeCommon "github.com/daeuniverse/dae/common"
++	"github.com/daeuniverse/dae/common/netutils"
+ 	daeConfig "github.com/daeuniverse/dae/config"
+ 	"github.com/daeuniverse/dae/pkg/config_parser"
+-	"github.com/mzz2017/softwind/netproxy"
+-	"github.com/mzz2017/softwind/protocol/direct"
++	"github.com/daeuniverse/outbound/netproxy"
++	"github.com/daeuniverse/outbound/protocol/direct"
+ 	"github.com/sirupsen/logrus"
+ )
+ 
+@@ -94,13 +96,48 @@ func preprocessWanInterfaceAuto(params *daeConfig.Config) error {
+ 	return nil
+ }
+ 
++// resolveCheckNetworkHost resolves addr's hostname via explicit DNS instead of
++// the Go net.Resolver. On Android there is no /etc/resolv.conf (netd owns DNS),
++// so the pure-Go resolver cannot look up hostnames and every attempt fails. We
++// fall back to the configured fallback resolver (8.8.8.8:53) which works even
++// before any dae routing is installed.
++func resolveCheckNetworkHost(ctx context.Context, addr string) (string, error) {
++	host, port, err := net.SplitHostPort(addr)
++	if err != nil {
++		return "", err
++	}
++	if net.ParseIP(host) != nil {
++		return addr, nil
++	}
++	dns := netutils.FallbackDns
++	if !dns.IsValid() {
++		dns = netip.MustParseAddrPort("8.8.8.8:53")
++	}
++	ip46, err4, err6 := netutils.ResolveIp46(ctx, direct.SymmetricDirect, dns, host, "udp", false)
++	ip := ip46.Ip4
++	if !ip.IsValid() {
++		ip = ip46.Ip6
++	}
++	if !ip.IsValid() {
++		return "", fmt.Errorf("resolve %v via explicit DNS failed (err4=%v, err6=%v)", host, err4, err6)
++	}
++	return net.JoinHostPort(ip.String(), port), nil
++}
++
+ func WaitForNetwork(log *logrus.Logger) {
+ 	epo := 5 * time.Second
+ 	client := http.Client{
+ 		Transport: &http.Transport{
+ 			DialContext: func(ctx context.Context, network, addr string) (c net.Conn, err error) {
++				// Resolve the hostname to an IP first: on Android the Go
++				// net.Resolver can't read /etc/resolv.conf, so dialing a
++				// hostname directly would fail forever and block reloads.
++				ipAddr, err := resolveCheckNetworkHost(ctx, addr)
++				if err != nil {
++					return nil, err
++				}
+ 				cd := netproxy.ContextDialer{Dialer: direct.SymmetricDirect}
+-				conn, err := cd.DialContext(ctx, "tcp", addr)
++				conn, err := cd.DialContext(ctx, "tcp", ipAddr)
+ 				if err != nil {
+ 					return nil, err
+ 				}

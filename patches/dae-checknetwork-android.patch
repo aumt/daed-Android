@@ -1,0 +1,36 @@
+diff --git a/cmd/run.go b/cmd/run.go
+index a4197bf..44ebf85 100644
+--- a/cmd/run.go
++++ b/cmd/run.go
+@@ -1148,6 +1148,31 @@ func newControlPlaneWithMode(ctx context.Context, log *logrus.Logger, bpf any, d
+ 		client := http.Client{
+ 			Transport: &http.Transport{
+ 				DialContext: func(ctx context.Context, network, addr string) (c net.Conn, err error) {
++					// On Android there is no /etc/resolv.conf (netd owns DNS), so
++					// the pure-Go net.Resolver cannot look up hostnames and every
++					// connection to a hostname fails forever, blocking the reload.
++					// Resolve the hostname via explicit DNS first (netutils falls
++					// back to the configured fallback resolver, e.g. 8.8.8.8:53),
++					// then dial the IP with the dae socket mark.
++					host, port, err := net.SplitHostPort(addr)
++					if err != nil {
++						return nil, err
++					}
++					if net.ParseIP(host) == nil {
++						dns := netutils.FallbackDns
++						if !dns.IsValid() {
++							dns = netip.MustParseAddrPort("8.8.8.8:53")
++						}
++						ip46, err4, err6 := netutils.ResolveIp46(ctx, direct.SymmetricDirect, dns, host, "udp", false)
++						ip := ip46.Ip4
++						if !ip.IsValid() {
++							ip = ip46.Ip6
++						}
++						if !ip.IsValid() {
++							return nil, fmt.Errorf("resolve %v via explicit DNS failed (err4=%v, err6=%v)", host, err4, err6)
++						}
++						addr = net.JoinHostPort(ip.String(), port)
++					}
+ 					conn, err := direct.SymmetricDirect.DialContext(ctx, common.MagicNetwork("tcp", conf.Global.SoMarkFromDae, conf.Global.Mptcp), addr)
+ 					if err != nil {
+ 						return nil, err
