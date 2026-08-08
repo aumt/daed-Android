@@ -91,6 +91,11 @@ jobs:
         run: |
           git apply ../patches/dae-wing-checknetwork-android.patch
 
+      - name: Apply Android runtime-traffic stats fix to dae-wing
+        working-directory: wing
+        run: |
+          git apply ../patches/dae-wing-runtime-stats-android.patch
+
       - name: Apply Android uid-0 WAN egress exemption to dae-core
         working-directory: wing/dae-core
         run: |

@@ -1,0 +1,34 @@
+diff --git a/dae/runtime.go b/dae/runtime.go
+index 2ab0d68..04a6915 100644
+--- a/dae/runtime.go
++++ b/dae/runtime.go
+@@ -30,17 +30,25 @@ type RuntimeOverview struct {
+ }
+ 
+ func GetRuntimeOverview(windowSec int, maxPoints int) (*RuntimeOverview, error) {
+-	activeTCPConnections := 0
+ 	ctl, err := ControlPlane()
+ 	if err != nil {
+ 		if !errors.Is(err, ErrControlPlaneNotInit) {
+ 			return nil, err
+ 		}
+-	} else {
+-		activeTCPConnections = ctl.ActiveTCPConnections()
++		ctl = nil
+ 	}
+ 
+-	snapshot := control.SnapshotRuntimeStats(activeTCPConnections, control.DefaultUdpEndpointPool.Count(), windowSec, maxPoints)
++	// dae records runtime traffic into the control plane's per-instance stats
++	// (handleTCP/UDP and the DNS listener all route through
++	// c.runtimeStatsStore()), but the package-level SnapshotRuntimeStats only
++	// reads the global copy, which nothing populates on a running instance. Read
++	// the instance stats so the web UI traffic overview is not permanently zero.
++	var snapshot control.RuntimeStatsSnapshot
++	if ctl != nil {
++		snapshot = ctl.SnapshotRuntimeStats(windowSec, maxPoints)
++	} else {
++		snapshot = control.SnapshotRuntimeStats(0, 0, windowSec, maxPoints)
++	}
+ 
+ 	samples := make([]RuntimeTrafficSample, 0, len(snapshot.Samples))
+ 	for _, sample := range snapshot.Samples {
