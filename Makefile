@@ -76,6 +76,15 @@ magisk:
 	fi
 	cp wing/daed-android-arm64 $(MAGISK_DIR)/system/bin/daed
 	chmod 755 $(MAGISK_DIR)/system/bin/daed
+	# Quick-Settings tile system app (tap toggles the dae proxy, long-press
+	# opens the web UI). Requires an Android SDK + JDK; see android/tile/README.md.
+	@if [ -x "android/tile/build-apk.sh" ] || [ -f "android/tile/build-apk.sh" ]; then \
+		bash android/tile/build-apk.sh && \
+		mkdir -p $(MAGISK_DIR)/system/app/DaedTile && \
+		cp android/tile/build/daed-tile.apk $(MAGISK_DIR)/system/app/DaedTile/DaedTile.apk; \
+	else \
+		echo "WARNING: android/tile/build-apk.sh not found, skipping Quick-Settings tile"; \
+	fi
 	@if [ -d "$(MAGISK_WEB_DIST)" ]; then \
 		rm -rf $(MAGISK_DIR)/web; \
 		cp -r $(MAGISK_WEB_DIST) $(MAGISK_DIR)/web; \

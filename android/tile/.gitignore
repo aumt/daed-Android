@@ -1,0 +1,5 @@
+# Build output (see build-apk.sh)
+build/
+
+# Local build artifacts
+*.log

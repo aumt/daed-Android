@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Power icon for the daed Quick-Settings tile (white, QS tints it). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M13,3h-2v10h2V3zM12,21c-4.97,0 -9,-4.03 -9,-9 0,-2.12 0.74,-4.07 1.97,-5.61L4,5.06C2.53,6.74 1.75,8.78 1.75,11c0,5.65 4.6,10.25 10.25,10.25S22.25,16.65 22.25,11c0,-2.22 -0.78,-4.26 -2.25,-5.94l-0.97,1.33c1.23,1.54 1.97,3.49 1.97,5.61 0,4.97 -4.03,9 -9,9z"/>
+</vector>

@@ -6,6 +6,7 @@ on:
       - main
     paths:
       - 'android/magisk/**'
+      - 'android/tile/**'
       - '.github/workflows/magisk-build.yml'
       - 'Makefile'
       - 'install/friendly-filenames.json'
@@ -40,6 +41,11 @@ jobs:
         with:
           go-version: '1.26'
           cache: false
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
 
       - uses: pnpm/action-setup@v6.0.9
 
@@ -95,6 +101,11 @@ jobs:
         working-directory: wing
         run: |
           git apply ../patches/dae-wing-runtime-stats-android.patch
+
+      - name: Apply Android proxy-toggle (SIGUSR1/SIGUSR2) fix to dae-wing
+        working-directory: wing
+        run: |
+          git apply ../patches/dae-wing-proxy-toggle-android.patch
 
       - name: Apply Android uid-0 WAN egress exemption to dae-core
         working-directory: wing/dae-core
@@ -152,11 +163,19 @@ jobs:
               -X 'github.com/daeuniverse/dae-wing/db.AppDescription=daed Android Magisk Module'" \
             .
 
+      - name: Build daed Quick-Settings tile APK
+        run: |
+          bash android/tile/build-apk.sh
+
       - name: Stage Magisk module
         run: |
           mkdir -p android/magisk/system/bin
           cp wing/daed-android-arm64 android/magisk/system/bin/daed
           chmod 755 android/magisk/system/bin/daed
+          # Quick-Settings tile as a system app (toggles the dae proxy on tap,
+          # opens the web UI on long-press).
+          mkdir -p android/magisk/system/app/DaedTile
+          cp android/tile/build/daed-tile.apk android/magisk/system/app/DaedTile/DaedTile.apk
           # Inject the build version into module.prop
           sed -i "s/^version=.*/version=$VERSION/" android/magisk/module.prop
           echo "--- module.prop ---"
@@ -196,6 +215,12 @@ jobs:
           else
             echo "ERROR: system/bin/daed missing" && exit 1
           fi
+          # Ensure the Quick-Settings tile APK is present
+          if unzip -l daed-magisk-$VERSION.zip | grep -q 'system/app/DaedTile/DaedTile.apk'; then
+            echo "OK: system/app/DaedTile/DaedTile.apk present"
+          else
+            echo "ERROR: DaedTile.apk missing" && exit 1
+          fi
 
       - name: Create GitHub release
         if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
@@ -221,6 +246,12 @@ jobs:
           2. Open Magisk app → Modules → Install from storage → select the zip
           3. Reboot your device
           4. Run \`daed-open\` in a shell (or use \`shortcut.json\`) to open the web panel at http://127.0.0.1:2023
+
+          ## Quick-Settings tile
+          The module installs a \`daed\` system app with a Quick-Settings tile:
+          · Tap the tile → start / stop the dae proxy (the web UI keeps running)
+          · Long-press the tile → open the web UI at http://127.0.0.1:2023
+          Add the tile via Quick Settings → edit (the pencil icon) → drag \`daed\` in.
 
           See [android/magisk/README.md](https://github.com/${{ github.repository }}/blob/main/android/magisk/README.md) for details."
           fi

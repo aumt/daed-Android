@@ -23,6 +23,7 @@ daed Android Magisk 模块版本，可在已 root 的 Android 设备上以 Magis
 
 - 二进制：`/data/adb/modules/daed/system/bin/daed`
 - 快捷跳转脚本：`/data/adb/modules/daed/system/bin/daed-open`
+- 磁贴系统应用：`/data/adb/modules/daed/system/app/DaedTile/DaedTile.apk`
 - 配置目录：`/data/adb/daed`（含 `wing.db` 数据库、`daed.log` 日志）
 
 ## 🗂️ Geo 数据（geosite / geoip）
@@ -52,6 +53,20 @@ daed run -c /data/adb/daed
 ```bash
 su -c 'daed run -c /data/adb/daed &'
 ```
+
+## 🎛️ 快捷设置磁贴（Quick-Settings Tile）
+
+模块以系统应用形式安装一个 `daed` 磁贴，可快捷开关 dae 代理：
+
+- **点按磁贴**：开启 / 关闭 **dae 代理**（daed 的 WebUI 服务保持运行，不随代理停止）
+- **长按磁贴**：打开 WebUI `http://127.0.0.1:2023`（服务监听 `0.0.0.0:2023`）
+- 磁贴图标实时反映代理状态（亮 = 运行中，暗 = 已停止）
+
+**添加磁贴：** 下拉通知栏 → 快捷设置 → 点击铅笔编辑 → 把 `daed` 磁贴拖入。首次点按会弹出 Magisk 超级用户授权对话框，允许一次后即可静默工作。
+
+**实现原理：** 磁贴通过 root 向 daed 进程发送 `SIGUSR2`（开启代理）/ `SIGUSR1`（停止代理）信号，daed 内部复用与 WebUI 相同的 `run` 逻辑完成切换，因此数据库运行状态、代理状态保持一致；WebUI 进程始终存活。停止状态会写入标记文件 `/data/adb/daed/.dae-stopped`，供磁贴快速读取。
+
+**卸载或升级后残留：** 若曾停止过代理，`/data/adb/daed/.dae-stopped` 标记文件与数据库运行状态共同决定下次开机的代理状态，无需手动清理。
 
 ## 🔗 快捷跳转配置地址
 

@@ -4,5 +4,8 @@ daed
 # Web frontend assets
 web/
 
+# Quick-Settings tile system app (built from ../tile by build-apk.sh)
+system/app/DaedTile/
+
 # Final packaged artifact
 *.zip

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">daed 开关</string>
+    <string name="tile_label">daed</string>
+    <string name="tile_running">daed 代理运行中</string>
+    <string name="tile_stopped">daed 代理已停止</string>
+    <string name="tile_busy">切换中…</string>
+    <string name="tile_failed">操作失败</string>
+
+    <string name="main_title">daed 控制中心磁贴</string>
+    <string name="main_hint">用法：\n· 下拉快捷设置 → 编辑 → 把 daed 磁贴拖入\n· 点按磁贴：开启 / 关闭 dae 代理（WebUI 保持运行）\n· 长按磁贴：打开 WebUI（http://127.0.0.1:2023，服务监听 0.0.0.0:2023）\n· 首次点按会弹出 Magisk 超级用户授权，请允许</string>
+    <string name="main_refresh">刷新状态</string>
+    <string name="main_open_web">打开 WebUI</string>
+    <string name="main_open_web_failed">无法打开 WebUI</string>
+    <string name="main_status_running">dae 代理运行中</string>
+    <string name="main_status_stopped">dae 代理已停止</string>
+    <string name="main_status_daed_down">daed 未运行</string>
+    <string name="main_status_unknown">无法检测状态</string>
+</resources>

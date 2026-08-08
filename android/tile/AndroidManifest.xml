@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.github.aumt.daedtile">
+
+    <!-- minSdk 26 (Android 8.0): TileService requires API 24+;
+         we use 26 for wider vector-drawable safety. -->
+    <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
+
+    <application
+        android:label="@string/app_name"
+        android:icon="@drawable/ic_tile"
+        android:allowBackup="false">
+
+        <!-- Launcher entry: shows daed status and how to add the tile. -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Quick Settings tile: toggles the daed daemon on/off via root. -->
+        <service
+            android:name=".DaedTileService"
+            android:label="@string/tile_label"
+            android:icon="@drawable/ic_tile"
+            android:exported="true"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>
