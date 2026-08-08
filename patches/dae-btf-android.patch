@@ -1,0 +1,33 @@
+diff --git a/control/control_plane.go b/control/control_plane.go
+index 7ede204..b288d63 100644
+--- a/control/control_plane.go
++++ b/control/control_plane.go
+@@ -24,6 +24,7 @@ import (
+ 	"github.com/bits-and-blooms/bloom/v3"
+ 	"github.com/cilium/ebpf"
+ 	"github.com/cilium/ebpf/asm"
++	"github.com/cilium/ebpf/btf"
+ 	"github.com/cilium/ebpf/features"
+ 	"github.com/cilium/ebpf/rlimit"
+ 	"github.com/daeuniverse/dae/common"
+@@ -455,8 +456,19 @@ func newControlPlaneWithContextOptions(
+ 		log.Infof("The loading process takes about 120MB free memory, which will be released after loading. Insufficient memory will cause loading failure.")
+ 	}
+ 	// var bpf bpfObjects
++	//
++	// Load only the vmlinux BTF for CO-RE relocation instead of letting
++	// cilium/ebpf discover every kernel module under /sys/kernel/btf.
++	// On kernels where a module's .BTF section is corrupted/truncated (e.g.
++	// KUnit test modules built with LTO/BOLT optimizations), module discovery
++	// aborts the whole load with "load BTF for kmod ...". dae's programs only
++	// reference core kernel types found in vmlinux, so module BTF is not needed.
++	kernelSpec, err := btf.LoadSpec("/sys/kernel/btf/vmlinux")
++	if err != nil {
++		return nil, fmt.Errorf("failed to load vmlinux BTF for CO-RE relocation: %w", err)
++	}
+ 	ProgramOptions := ebpf.ProgramOptions{
+-		KernelTypes: nil,
++		KernelTypes: kernelSpec,
+ 	}
+ 	if log.Level == logrus.PanicLevel {
+ 		ProgramOptions.LogLevel = ebpf.LogLevelBranch | ebpf.LogLevelStats
