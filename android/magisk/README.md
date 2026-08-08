@@ -23,7 +23,19 @@ daed Android Magisk 模块版本，可在已 root 的 Android 设备上以 Magis
 
 - 二进制：`/data/adb/modules/daed/system/bin/daed`
 - 快捷跳转脚本：`/data/adb/modules/daed/system/bin/daed-open`
-- 配置目录：`/data/adb/daed`
+- 配置目录：`/data/adb/daed`（含 `wing.db` 数据库、`daed.log` 日志）
+
+## 🗂️ Geo 数据（geosite / geoip）
+
+dae 的路由规则依赖 `geosite.dat` 和 `geoip.dat`（例如 `geosite:cn`、`geoip:cn`、`geoip:private`）。模块未内置这两份文件，`service.sh` 会在开机自启时检测缺失并自动从 v2fly 官方 Release 下载到配置目录 `/data/adb/daed/`（dae 会在此目录查找）。
+
+- 下载源：`v2fly/domain-list-community`（→ `geosite.dat`）与 `v2fly/geoip`（→ `geoip.dat`），与 dae-core 解码格式一致
+- 下载为 best-effort：若开机时网络未就绪导致下载失败，daed 仍会启动（此时若路由规则引用 geosite/geoip 则 reload 会失败并回滚），可在网络恢复后重启设备，或手动放置文件：
+
+```bash
+su -c 'curl -L -o /data/adb/daed/geosite.dat https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat'
+su -c 'curl -L -o /data/adb/daed/geoip.dat https://github.com/v2fly/geoip/releases/latest/download/geoip.dat'
+```
 
 ## 🚀 开机自启
 
