@@ -16,9 +16,10 @@ import java.util.concurrent.TimeUnit;
  * serves the web UI on :2023) keeps running, so the panel stays reachable
  * while the proxy is off. dae-wing is patched for Android to handle
  * SIGUSR1 (stop proxy) and SIGUSR2 (start proxy) by reusing the exact code
- * path of the web UI's start/stop buttons. The state is persisted by daed in
- * its DB "running" flag (honoured again at boot by service.sh) and mirrored
- * to a marker file that this class reads cheaply.
+ * path of the web UI's start/stop buttons. Signals are sent with numeric
+ * codes (-10/-12) because toybox pkill rejects signal names. The state is
+ * persisted by daed in its DB "running" flag (honoured again at boot by
+ * service.sh) and mirrored to a marker file that this class reads cheaply.
  */
 final class Daedctl {
 
@@ -55,12 +56,14 @@ final class Daedctl {
 
     /** Stops the dae proxy (SIGUSR1); keeps the daed web UI up. */
     static boolean stopProxy() {
-        return exec("pkill -USR1 -f '[d]aed run'").code == 0;
+        // Numeric signals: this device's toybox pkill rejects signal NAMES
+        // (-USR1 -> "pkill: bad -U 'SR1'"), so use SIGUSR1=10 / SIGUSR2=12.
+        return exec("pkill -10 -f '[d]aed run'").code == 0;
     }
 
     /** Starts the dae proxy (SIGUSR2); keeps the daed web UI up. */
     static boolean startProxy() {
-        return exec("pkill -USR2 -f '[d]aed run'").code == 0;
+        return exec("pkill -12 -f '[d]aed run'").code == 0;
     }
 
     static final class Result {

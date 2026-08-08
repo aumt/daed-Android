@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">daed 开关</string>
-    <string name="tile_label">daed</string>
+    <string name="tile_label">dae</string>
     <string name="tile_running">daed 代理运行中</string>
     <string name="tile_stopped">daed 代理已停止</string>
     <string name="tile_busy">切换中…</string>
