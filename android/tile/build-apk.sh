@@ -74,18 +74,9 @@ echo "platform   = $PLAT"
 D8()        { java -cp "$D8_JAR" com.android.tools.r8.D8 "$@"; }
 APKSIGNER() { java -cp "$APKSIGNER_JAR" com.android.apksigner.ApkSignerTool "$@"; }
 
-# --- compile Java -----------------------------------------------------------
-# -source/-target 8: javac >= 9 rejects -bootclasspath with a target > 8
-# ("option --boot-class-path not allowed with target 11"), and compiling
-# against android.jar as the boot class path is the only way to check Java
-# APIs against what Android actually ships. The tile source is Java 8 syntax
-# (lambdas / method references only); d8 desugars it for min-api 26.
-find src -name '*.java' > "$OUT/sources.txt"
-javac -source 8 -target 8 -nowarn \
-  -bootclasspath "$ANDROID_JAR" \
-  -d "$OUT/obj" @"$OUT/sources.txt"
-
 # --- compile + link resources (aapt2) --------------------------------------
+# Run before javac: aapt2 link generates R.java (--java) that the sources
+# reference, plus the compiled resource tree that ends up in the APK.
 "$AAPT2" compile --dir res -o "$OUT/res.zip"
 "$AAPT2" link -o "$OUT/unsigned.apk" \
   -I "$ANDROID_JAR" \
@@ -96,10 +87,16 @@ javac -source 8 -target 8 -nowarn \
   --auto-add-overlay \
   "$OUT/res.zip"
 
-# Compile the R.java generated under gen/.
+# --- compile Java (app sources + generated R.java in one pass) --------------
+# -source/-target 8: javac >= 9 rejects -bootclasspath with a target > 8
+# ("option --boot-class-path not allowed with target 11"), and compiling
+# against android.jar as the boot class path is the only way to check Java
+# APIs against what Android actually ships. The tile source is Java 8 syntax
+# (lambdas / method references only); d8 desugars it for min-api 26.
+find src "$OUT/gen" -name '*.java' > "$OUT/sources.txt"
 javac -source 8 -target 8 -nowarn \
   -bootclasspath "$ANDROID_JAR" \
-  -d "$OUT/obj" $(find "$OUT/gen" -name 'R.java')
+  -d "$OUT/obj" @"$OUT/sources.txt"
 
 # --- dex --------------------------------------------------------------------
 D8 --release --lib "$ANDROID_JAR" --min-api 26 \
