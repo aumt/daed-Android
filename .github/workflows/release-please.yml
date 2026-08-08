@@ -1,9 +1,11 @@
 name: Release Please
 
 on:
-  push:
-    branches:
-      - main
+  # Disabled push trigger for this Android Magisk fork: release-please is the
+  # upstream Linux publish pipeline (release PR creation, multi-arch bundles,
+  # container images, gh-pages) and is irrelevant here. Every push previously
+  # failed with "GitHub Actions is not permitted to create or approve pull
+  # requests". Keep the file for manual use only (workflow_dispatch).
   workflow_dispatch:
     inputs:
       tag_name:
