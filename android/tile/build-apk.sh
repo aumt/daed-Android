@@ -75,8 +75,13 @@ D8()        { java -cp "$D8_JAR" com.android.tools.r8.D8 "$@"; }
 APKSIGNER() { java -cp "$APKSIGNER_JAR" com.android.apksigner.ApkSignerTool "$@"; }
 
 # --- compile Java -----------------------------------------------------------
+# -source/-target 8: javac >= 9 rejects -bootclasspath with a target > 8
+# ("option --boot-class-path not allowed with target 11"), and compiling
+# against android.jar as the boot class path is the only way to check Java
+# APIs against what Android actually ships. The tile source is Java 8 syntax
+# (lambdas / method references only); d8 desugars it for min-api 26.
 find src -name '*.java' > "$OUT/sources.txt"
-javac -source 11 -target 11 -nowarn \
+javac -source 8 -target 8 -nowarn \
   -bootclasspath "$ANDROID_JAR" \
   -d "$OUT/obj" @"$OUT/sources.txt"
 
@@ -92,7 +97,7 @@ javac -source 11 -target 11 -nowarn \
   "$OUT/res.zip"
 
 # Compile the R.java generated under gen/.
-javac -source 11 -target 11 -nowarn \
+javac -source 8 -target 8 -nowarn \
   -bootclasspath "$ANDROID_JAR" \
   -d "$OUT/obj" $(find "$OUT/gen" -name 'R.java')
 
