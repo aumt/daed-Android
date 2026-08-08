@@ -53,5 +53,4 @@ bash android/tile/build-apk.sh
 
 ## 注意
 
-- 本目录不在 Windows 本机构建，只写源码，构建由 CI 与本地 Linux 环境完成。
 - `build/` 为构建产物目录，已被 `.gitignore` 排除。
