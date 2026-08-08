@@ -1,0 +1,41 @@
+diff --git a/control/netns_utils.go b/control/netns_utils.go
+index 41966ee..c419f86 100644
+--- a/control/netns_utils.go
++++ b/control/netns_utils.go
+@@ -116,7 +116,13 @@ func (ns *DaeNetns) Close() (err error) {
+ 	if ns == nil {
+ 		return nil
+ 	}
+-	_ = DeleteNamedNetns(NsName)
++	// daeNs is an anonymous (unpinned) netns handle: closing its fd releases
++	// the namespace itself. There is no named-netns file to unmount/remove,
++	// which is what DeleteNamedNetns() used to do. This avoids touching
++	// /run/netns, which does not exist on Android (read-only root fs).
++	if ns.daeNs > 0 {
++		_ = ns.daeNs.Close()
++	}
+ 	_ = DeleteLink(HostVethName)
+ 	return
+ }
+@@ -391,13 +397,17 @@ func (ns *DaeNetns) setupVeth() (err error) {
+ }
+ 
+ func (ns *DaeNetns) setupNetns() (err error) {
+-	// ip netns a daens
+-	_ = DeleteNamedNetns(NsName)
+-	ns.daeNs, err = netns.NewNamed(NsName)
++	// Create an anonymous (unpinned) network namespace instead of a named one.
++	// netns.New() only unshares CLONE_NEWNET and opens /proc/self/ns/net, so it
++	// does NOT require a writable /run or /var/run mountpoint. This is required
++	// on Android where the root filesystem is read-only (erofs) and /run does
++	// not exist: netns.NewNamed() would fail at os.MkdirAll("/run/netns") with
++	// "mkdir /run: read-only file system".
++	ns.daeNs, err = netns.New()
+ 	if err != nil {
+ 		return fmt.Errorf("failed to create netns: %v", err)
+ 	}
+-	// NewNamed() will switch to the new netns, switch back to host netns
++	// netns.New() will switch to the new netns, switch back to host netns
+ 	if err = netns.Set(ns.hostNs); err != nil {
+ 		return fmt.Errorf("failed to switch to host netns: %v", err)
+ 	}

@@ -71,6 +71,11 @@ jobs:
           pnpm install --no-frozen-lockfile
           pnpm build --filter daed
 
+      - name: Apply Android netns fix to dae-core
+        working-directory: wing/dae-core
+        run: |
+          git apply ../../patches/dae-netns-android.patch
+
       - name: Build eBPF objects (arm64)
         working-directory: wing/dae-core
         run: |
