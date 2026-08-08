@@ -253,5 +253,8 @@ jobs:
           · Long-press the tile → open the web UI at http://127.0.0.1:2023
           Add the tile via Quick Settings → edit (the pencil icon) → drag \`daed\` in.
 
+          ## Requirements
+          eBPF functionality depends on the kernel version (>= 5.10 recommended, with BPF-related options enabled).
+
           See [android/magisk/README.md](https://github.com/${{ github.repository }}/blob/main/android/magisk/README.md) for details."
           fi
