@@ -13,7 +13,7 @@
 
     <application
         android:label="@string/app_name"
-        android:icon="@drawable/ic_tile"
+        android:icon="@drawable/logo"
         android:allowBackup="false">
 
         <!-- Headless entry opened from the QS tile: ColorOS launches it
@@ -34,7 +34,7 @@
         <service
             android:name=".DaedTileService"
             android:label="@string/tile_label"
-            android:icon="@drawable/ic_tile"
+            android:icon="@drawable/logo"
             android:exported="true"
             android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
             <intent-filter>
