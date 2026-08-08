@@ -3,12 +3,13 @@
 一个无 Gradle 依赖的 Android 快捷设置磁贴系统应用，用于快捷控制 daed：
 
 - **点按磁贴**：开启 / 关闭 **dae 代理**（daed WebUI 服务保持运行）
-- **长按磁贴**：呼出系统磁贴详情面板，点齿轮（⚙）打开 WebUI `http://127.0.0.1:2023`
+- **长按磁贴**：打开 WebUI `http://127.0.0.1:2023`。ColorOS 长按直接打开；原生 Android 呼出详情面板，点齿轮（⚙）打开
 - 磁贴状态实时反映代理运行状态
+- **无桌面图标**：应用不注册 `MAIN/LAUNCHER` 活动，只在快捷设置里以磁贴形式存在
 
-> Android 的 `TileService` 无 `onLongClick` 钩子：长按磁贴由 SystemUI 展示详情面板。本模块通过 `QS_TILE_PREFERENCES` intent 把详情面板的齿轮入口指向主界面（自动打开 WebUI），这是原生框架下最接近"长按开 WebUI"的实现。
+> Android 的 `TileService` 无 `onLongClick` 钩子：长按磁贴由 SystemUI 处理。本模块在 `MainActivity` 上注册 `QS_TILE_PREFERENCES` intent：ColorOS 长按会直接拉起该活动（自动打开 WebUI），原生 Android 则从详情面板的齿轮进入 —— 因此即使没有 launcher 入口，长按开 WebUI 依旧可用。
 
-通过 Magisk 模块以系统应用形式安装到 `system/app/DaedTile/DaedTile.apk`。
+通过 Magisk 模块以系统应用形式安装到 `system/app/DaedTile/DaedTile.apk`。应用在系统启动（`BOOT_COMPLETED`）时调用 `TileService.requestListeningState()` 注册磁贴，否则从未被用户启动过的系统磁贴应用不会进入 SystemUI 磁贴列表。
 
 ## 工作原理
 
@@ -29,7 +30,8 @@ keystore/daed-tile.p12       固定签名密钥库（密码 android），保证 
 src/io/github/aumt/daedtile/
   Daedctl.java               root 命令封装（pgrep/pkill/nohup + marker 读取）
   DaedTileService.java       磁贴（onClick / onLongClick）
-  MainActivity.java          启动入口：状态页 + 打开 WebUI 按钮
+  MainActivity.java          无 UI 入口：长按磁贴拉起后打开 WebUI 并立即退出
+  BootReceiver.java          开机/更新后注册磁贴（requestListeningState）
 res/                         strings / 图标
 ```
 

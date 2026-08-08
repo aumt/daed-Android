@@ -250,7 +250,8 @@ jobs:
           ## Quick-Settings tile
           The module installs a \`daed\` system app with a Quick-Settings tile:
           · Tap the tile → start / stop the dae proxy (the web UI keeps running)
-          · Long-press the tile → detail sheet → gear → open the web UI at http://127.0.0.1:2023
+          · Long-press the tile → open the web UI at http://127.0.0.1:2023 (ColorOS opens it directly; stock Android via the detail-sheet gear)
+          · No launcher icon — the tile is the only entry point
           Add the tile via Quick Settings → edit (the pencil icon) → drag \`daed\` in.
 
           ## Requirements

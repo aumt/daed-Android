@@ -6,21 +6,25 @@
          we use 26 for wider vector-drawable safety. -->
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
+    <!-- Register the QS tile at boot: a system-installed tile app is never
+         launched by the user, so requestListeningState on boot is what makes
+         the tile appear in the Quick-Settings edit list. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:label="@string/app_name"
         android:icon="@drawable/ic_tile"
         android:allowBackup="false">
 
-        <!-- Launcher entry + QS tile detail entry (the gear shown on
-             long-press): shows daed status and opens the web UI. -->
+        <!-- Headless entry opened from the QS tile: ColorOS launches it
+             directly on long-press, stock Android via the tile-detail gear.
+             Opens the daed web UI and finishes. No MAIN/LAUNCHER filter, so
+             the app has no desktop/app-drawer icon. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:excludeFromRecents="true"
             android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
@@ -37,5 +41,16 @@
                 <action android:name="android.service.quicksettings.action.QS_TILE" />
             </intent-filter>
         </service>
+
+        <!-- Requests tile listening state on boot / package update so the
+             tile registers into SystemUI. -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>
