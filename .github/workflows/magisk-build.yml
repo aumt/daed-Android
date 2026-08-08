@@ -103,7 +103,13 @@ jobs:
       - name: Build Android arm64 binary
         working-directory: wing
         env:
-          GOOS: android
+          # Build as GOOS=linux (static, CGO_ENABLED=0) instead of GOOS=android.
+          # cilium/ebpf v0.20 gates all CO-RE fixups on platform.IsLinux
+          # (runtime.GOOS == "linux"); under GOOS=android the CO-RE relocation
+          # of every dae program fails with "CO-RE fixup: not supported on
+          # android". A CGO_ENABLED=0 static ELF for linux runs fine on the
+          # Android kernel (bionic not required), so dae's eBPF works.
+          GOOS: linux
           GOARCH: arm64
           CGO_ENABLED: 0
           GOFLAGS: -trimpath -modcacherw
