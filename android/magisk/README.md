@@ -68,6 +68,14 @@ su -c 'daed run -c /data/adb/daed &'
 
 **添加磁贴：** 下拉通知栏 → 快捷设置 → 点击编辑 → 把 `dae` 磁贴拖入。首次点按需要授予 root 权限，允许一次后即可静默工作。
 
+**没看到磁贴？** 刷入模块并重启后，若快捷设置编辑列表里仍没有 `dae` 磁贴，手动安装一次磁贴应用即可（模块在安装时和开机时已尝试自动安装，以下命令为兜底）：
+
+```bash
+su -c 'pm install -r /data/adb/modules/daed/system/app/DaedTile/DaedTile.apk'
+```
+
+部分 ROM（如 ColorOS/OPPO）不会自动注册 Magisk 注入的 `system/app` 应用，需显式 `pm install` 一次后磁贴即会出现。
+
 **实现原理：** 磁贴通过 root 向 daed 进程发送 `SIGUSR2`（开启代理）/ `SIGUSR1`（停止代理）信号，daed 内部复用与 WebUI 相同的 `run` 逻辑完成切换，因此数据库运行状态、代理状态保持一致；WebUI 进程始终存活。停止状态会写入标记文件 `/data/adb/daed/.dae-stopped`，供磁贴快速读取。
 
 **卸载或升级后残留：** 若曾停止过代理，`/data/adb/daed/.dae-stopped` 标记文件与数据库运行状态共同决定下次开机的代理状态，无需手动清理。

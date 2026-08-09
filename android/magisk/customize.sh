@@ -26,6 +26,21 @@ fi
 # Magisk overlays system/ onto /system automatically, no manual copy needed
 set_perm_recursive "$MODPATH/system/bin" 0 0 0755 0755
 
+# Register the Quick-Settings tile app immediately so the dae tile shows up
+# without a manual `pm install`. The APK ships under system/app/, which most
+# ROMs register on boot, but some ROMs (e.g. ColorOS/OPPO) ignore a
+# Magisk-injected system app until it is explicitly installed. When flashing
+# from the Magisk app, pm is available right here; under recovery it is not,
+# and service.sh retries the install on the next boot. Idempotent.
+if command -v pm >/dev/null 2>&1; then
+    ui_print "Registering Quick-Settings tile app..."
+    if pm install -r --user 0 "$MODPATH/system/app/DaedTile/DaedTile.apk" >/dev/null 2>&1; then
+        ui_print "  tile app installed"
+    else
+        ui_print "  tile app install deferred (service.sh retries on boot)"
+    fi
+fi
+
 ui_print ""
 ui_print "daed installed successfully!"
 ui_print ""

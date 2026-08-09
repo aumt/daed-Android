@@ -247,6 +247,7 @@ jobs:
           · Long-press the tile → open the web UI at http://127.0.0.1:2023 (ColorOS opens it directly; stock Android Haven't tried it yet)
           · No launcher icon — the tile is the only entry point
           Add the tile via Quick Settings → edit (the pencil icon) → drag \`dae\` in.
+          If the tile is missing after a reboot, install the app once manually: \`pm install -r /data/adb/modules/daed/system/app/DaedTile/DaedTile.apk\`
 
           ## Requirements
           eBPF functionality depends on the kernel version (>= 5.10 recommended, with BPF-related options enabled).

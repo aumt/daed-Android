@@ -9,6 +9,29 @@ LOG_FILE="/data/adb/daed/daed.log"
 # Wait for system/network to be ready
 sleep 5
 
+# Register the Quick-Settings tile app if it isn't already, so the dae tile
+# shows up without a manual `pm install`. customize.sh already installs it
+# during a Magisk-app flash; this covers recovery flashes and ROMs (e.g.
+# ColorOS/OPPO) that ignore a Magisk-injected system/app APK until it is
+# explicitly installed. Idempotent: if the package is registered, no-op.
+TILE_PKG="io.github.aumt.daedtile"
+TILE_APK="$MODPATH/system/app/DaedTile/DaedTile.apk"
+if [ -f "$TILE_APK" ] && command -v pm >/dev/null 2>&1; then
+    # Wait (bounded) for PackageManager to be up before querying it.
+    i=0
+    while [ "$(getprop sys.boot_completed)" != "1" ] && [ "$i" -lt 120 ]; do
+        sleep 2
+        i=$((i+2))
+    done
+    if ! pm path "$TILE_PKG" >/dev/null 2>&1; then
+        if pm install -r --user 0 "$TILE_APK" >/dev/null 2>&1; then
+            echo "$(date): installed Quick-Settings tile app" >> "$LOG_FILE"
+        else
+            echo "$(date): WARN: could not install Quick-Settings tile app; run: pm install -r $TILE_APK" >> "$LOG_FILE"
+        fi
+    fi
+fi
+
 # Prevent duplicate instances
 if pgrep -f 'daed run' >/dev/null 2>&1 || pidof daed >/dev/null 2>&1; then
     exit 0
