@@ -248,11 +248,11 @@ jobs:
           4. Run \`daed-open\` in a shell (or use \`shortcut.json\`) to open the web panel at http://127.0.0.1:2023
 
           ## Quick-Settings tile
-          The module installs a \`daed\` system app with a Quick-Settings tile:
+          The module installs a \`dae\` system app with a Quick-Settings tile:
           · Tap the tile → start / stop the dae proxy (the web UI keeps running)
-          · Long-press the tile → open the web UI at http://127.0.0.1:2023 (ColorOS opens it directly; stock Android via the detail-sheet gear)
+          · Long-press the tile → open the web UI at http://127.0.0.1:2023 (ColorOS opens it directly; stock Android Haven't tried it yet)
           · No launcher icon — the tile is the only entry point
-          Add the tile via Quick Settings → edit (the pencil icon) → drag \`daed\` in.
+          Add the tile via Quick Settings → edit (the pencil icon) → drag \`dae\` in.
 
           ## Requirements
           eBPF functionality depends on the kernel version (>= 5.10 recommended, with BPF-related options enabled).
