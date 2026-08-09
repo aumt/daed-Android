@@ -1,15 +1,9 @@
 name: Build Magisk Module
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'android/magisk/**'
-      - 'android/tile/**'
-      - '.github/workflows/magisk-build.yml'
-      - 'Makefile'
-      - 'install/friendly-filenames.json'
+  # Push trigger removed: the wing submodule gitlink points to local-only
+  # commits, so every push-triggered build fails at submodule checkout.
+  # Build manually via workflow_dispatch instead.
   workflow_dispatch:
     inputs:
       version:
