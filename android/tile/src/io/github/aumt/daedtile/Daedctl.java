@@ -17,9 +17,12 @@ import java.util.concurrent.TimeUnit;
  * while the proxy is off. dae-wing is patched for Android to handle
  * SIGUSR1 (stop proxy) and SIGUSR2 (start proxy) by reusing the exact code
  * path of the web UI's start/stop buttons. Signals are sent with numeric
- * codes (-10/-12) because toybox pkill rejects signal names. The state is
- * persisted by daed in its DB "running" flag (honoured again at boot by
- * service.sh) and mirrored to a marker file that this class reads cheaply.
+ * codes (-10/-12) because toybox pkill rejects signal names, and the daed
+ * process is addressed by exact name (-x daed) because toybox's -f is a
+ * substring match that would otherwise signal the calling shell itself and
+ * leave a non-zero exit code (see isDaedRunning). The state is persisted by
+ * daed in its DB "running" flag (honoured again at boot by service.sh) and
+ * mirrored to a marker file that this class reads cheaply.
  */
 final class Daedctl {
 
@@ -39,7 +42,11 @@ final class Daedctl {
 
     /** True when the daed process (and thus the web UI) is running. */
     static boolean isDaedRunning() {
-        return exec("pgrep -f '[d]aed run' >/dev/null 2>&1").code == 0;
+        // -x (exact process-name match) instead of -f: this device's toybox
+        // pgrep matches -f patterns as a substring, so the classic '[d]aed'
+        // self-exclusion trick fails and the pattern also hits the calling
+        // shell process. -x matches only the daed process name.
+        return exec("pgrep -x daed >/dev/null 2>&1").code == 0;
     }
 
     /** True when the dae proxy is actively running. */
@@ -58,12 +65,15 @@ final class Daedctl {
     static boolean stopProxy() {
         // Numeric signals: this device's toybox pkill rejects signal NAMES
         // (-USR1 -> "pkill: bad -U 'SR1'"), so use SIGUSR1=10 / SIGUSR2=12.
-        return exec("pkill -10 -f '[d]aed run'").code == 0;
+        // -f '[d]aed run' would self-match (substring match) and signal the
+        // calling shell -> non-zero exit even though the proxy switched; -x
+        // pins the daed process name so the command returns 0 on success.
+        return exec("pkill -10 -x daed").code == 0;
     }
 
     /** Starts the dae proxy (SIGUSR2); keeps the daed web UI up. */
     static boolean startProxy() {
-        return exec("pkill -12 -f '[d]aed run'").code == 0;
+        return exec("pkill -12 -x daed").code == 0;
     }
 
     static final class Result {
