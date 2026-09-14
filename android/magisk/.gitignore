@@ -7,5 +7,8 @@ web/
 # Quick-Settings tile system app (built from ../tile by build-apk.sh)
 system/app/DaedTile/
 
+# Bundled geo data (staged by scripts/fetch-geo-data.sh at build time)
+geo/
+
 # Final packaged artifact
 *.zip

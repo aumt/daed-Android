@@ -5,6 +5,182 @@
 # Fallback MODPATH for manual execution
 MODPATH=${MODPATH:-/data/adb/modules/daed}
 LOG_FILE="/data/adb/daed/daed.log"
+GEO_DIR="/data/adb/daed"
+
+# Geo data sources: the official v2fly releases, whose v2ray format dae-core
+# decodes. Same sources as scripts/fetch-geo-data.sh, which stages the
+# compressed copy bundled in the module.
+GEOSITE_URL="https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
+GEOIP_URL="https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
+
+# The network is often not up yet when this runs, so a failed fetch is expected
+# rather than exceptional: retry across a few minutes before giving up.
+DOWNLOAD_ATTEMPTS=4
+RETRY_DELAY=60
+
+# --- Geo data -------------------------------------------------------------
+#
+# dae reads geosite.dat / geoip.dat for geosite:/geoip: routing rules, and
+# looks for them in the config dir (-c /data/adb/daed). dae-wing passes that
+# dir as externGeoDataDirs and dae-core searches it ahead of everything else,
+# so a copy under the module directory would never be found.
+#
+# The module ships a gzip-compressed copy, expanded at install time by
+# customize.sh. Everything below is the backstop for the cases that misses --
+# a recovery flash, a config dir that was not writable at install time, or a
+# user who deleted the files.
+#
+# All of it runs detached (see the --geo-refresh dispatch below), because the
+# network fallback can wait minutes for WiFi and must not hold up daed.
+
+# gunzip_to <src> <dst>: expand <src> into <dst>, trying the tools Android and
+# Magisk actually provide. Leaves no partial file behind on failure.
+#
+# Helper variables carry a leading underscore: POSIX sh has no `local`, so a
+# helper assigning a plain name silently overwrites that variable in its
+# caller. `fetch_to` below used to do exactly that with `dst` -- the caller's
+# loop variable -- and every retry then appended another ".tmp" to the
+# destination, so no download could ever land.
+gunzip_to() {
+    _src="$1"
+    _dst="$2"
+    if command -v busybox >/dev/null 2>&1 && busybox gzip -dc "$_src" > "$_dst" 2>/dev/null && [ -s "$_dst" ]; then
+        return 0
+    fi
+    if command -v gzip >/dev/null 2>&1 && gzip -dc "$_src" > "$_dst" 2>/dev/null && [ -s "$_dst" ]; then
+        return 0
+    fi
+    rm -f "$_dst"
+    return 1
+}
+
+# expand_bundled_geo_data: expand the module's geo/*.gz into GEO_DIR.
+#
+# Re-expands only when this build carries different data than what is already
+# installed, so a reflash of the same build is a no-op instead of 25MB of
+# pointless work -- and a copy the user refreshed by hand survives it.
+expand_bundled_geo_data() {
+    geo_src="$MODPATH/geo"
+    [ -d "$geo_src" ] || return 0
+
+    # Skip only when the marker matches *and* both files are present: a marker
+    # without its data (a file deleted by hand, or an expansion torn by a
+    # reboot) must be repaired from the bundled copy, not left to the network
+    # fallback below.
+    bundled_ver=$(cat "$geo_src/VERSION" 2>/dev/null)
+    installed_ver=$(cat "$GEO_DIR/.geo-bundled-version" 2>/dev/null)
+    if [ -n "$bundled_ver" ] && [ "$bundled_ver" = "$installed_ver" ] &&
+        [ -s "$GEO_DIR/geosite.dat" ] && [ -s "$GEO_DIR/geoip.dat" ]; then
+        return 0
+    fi
+
+    ok=1
+    for name in geosite.dat geoip.dat; do
+        src="$geo_src/$name.gz"
+        if [ ! -f "$src" ]; then
+            ok=0
+            continue
+        fi
+        if gunzip_to "$src" "$GEO_DIR/$name.tmp"; then
+            mv "$GEO_DIR/$name.tmp" "$GEO_DIR/$name"
+            echo "$(date): expanded bundled $name (build ${bundled_ver:-unknown})" >> "$LOG_FILE"
+        else
+            ok=0
+            echo "$(date): WARN: could not expand bundled $name" >> "$LOG_FILE"
+        fi
+    done
+
+    # Record the version only when both files landed: a partial expansion has
+    # to be retried, not remembered as complete.
+    [ "$ok" = "1" ] && printf '%s\n' "$bundled_ver" > "$GEO_DIR/.geo-bundled-version"
+    return 0
+}
+
+# fetch_to <url> <dst>: download <url> into <dst>.
+#
+# The output path is passed as an option (-o / -O) rather than as a trailing
+# argument: curl and wget treat every bare argument as a URL, so the previous
+# `curl <url> <path>` form made the path a second URL and failed with
+# "URL malformat" -- writing nothing, while dumping the payload to stdout.
+#
+# Underscored names for the same reason gunzip_to above explains.
+fetch_to() {
+    _url="$1"
+    _out="$2"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL --connect-timeout 15 --max-time 180 -o "$_out" "$_url"
+    elif command -v busybox >/dev/null 2>&1 && busybox wget --help >/dev/null 2>&1; then
+        busybox wget -q -O "$_out" "$_url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O "$_out" "$_url"
+    else
+        return 127
+    fi
+}
+
+# ensure_geo_file <name> <url>: download <name> if it is not already usable.
+ensure_geo_file() {
+    name="$1"
+    url="$2"
+    dst="$GEO_DIR/$name"
+    [ -s "$dst" ] && return 0
+
+    attempt=1
+    while [ "$attempt" -le "$DOWNLOAD_ATTEMPTS" ]; do
+        echo "$(date): downloading $name (attempt $attempt/$DOWNLOAD_ATTEMPTS) ..." >> "$LOG_FILE"
+        fetch_to "$url" "$dst.tmp" 2>>"$LOG_FILE"
+        rc=$?
+        if [ "$rc" -eq 0 ] && [ -s "$dst.tmp" ]; then
+            mv "$dst.tmp" "$dst"
+            echo "$(date): downloaded $name ($(wc -c < "$dst" | tr -d ' ') bytes)" >> "$LOG_FILE"
+            return 0
+        fi
+        rm -f "$dst.tmp"
+        # No downloader on the device at all: retrying cannot help.
+        if [ "$rc" -eq 127 ]; then
+            echo "$(date): WARN: no curl/wget available; cannot download $name" >> "$LOG_FILE"
+            return 1
+        fi
+        # Sleep before the next try: at boot this is usually just waiting for
+        # WiFi to associate.
+        [ "$attempt" -lt "$DOWNLOAD_ATTEMPTS" ] && sleep "$RETRY_DELAY"
+        attempt=$((attempt + 1))
+    done
+
+    echo "$(date): WARN: failed to download $name after $DOWNLOAD_ATTEMPTS attempts; place it at $dst manually if geosite/geoip rules fail" >> "$LOG_FILE"
+    return 1
+}
+
+# ensure_geo_data: bring the geo files up to date, detached from the boot path.
+ensure_geo_data() {
+    mkdir -p "$GEO_DIR" 2>/dev/null || return 0
+
+    # Serialize: a run waiting out a slow network must not overlap the next
+    # one. A lock left behind by a killed run is reclaimed after 30 minutes.
+    lock="$GEO_DIR/.geo-lock"
+    if ! mkdir "$lock" 2>/dev/null; then
+        if [ -n "$(find "$lock" -mmin +30 2>/dev/null)" ]; then
+            rm -rf "$lock"
+            mkdir "$lock" 2>/dev/null || return 0
+        else
+            return 0
+        fi
+    fi
+    trap 'rmdir "$lock" 2>/dev/null' EXIT INT TERM
+
+    expand_bundled_geo_data
+    ensure_geo_file geosite.dat "$GEOSITE_URL"
+    ensure_geo_file geoip.dat "$GEOIP_URL"
+}
+
+# Detached geo-refresh mode: re-executed by the boot path below so the refresh
+# runs in its own process, surviving this script and never blocking the boot.
+if [ "$1" = "--geo-refresh" ]; then
+    ensure_geo_data
+    exit 0
+fi
+
+# --- Boot path ------------------------------------------------------------
 
 # Wait for system/network to be ready
 sleep 5
@@ -51,41 +227,15 @@ if [ ! -x "$DAED_BIN" ]; then
     DAED_BIN="daed"
 fi
 
-# Ensure geosite/geoip data exists before starting dae.
+# Launch daed in background with logging.
 #
-# dae loads these files (geosite.dat / geoip.dat) for geosite:/geoip: routing
-# rules, and on Android there is no bundled copy — the module does not ship
-# them. dae looks them up in the config dir (-c /data/adb/daed), so download
-# them there once if missing. This is best-effort: if the network is not up at
-# boot, daed still starts and the data is fetched on a later boot (or can be
-# placed manually at /data/adb/daed/geosite.dat and geoip.dat).
-# Sources are the official v2fly releases, whose v2ray format dae-core decodes.
-download_geo_data() {
-    name="$1"
-    url="$2"
-    dst="/data/adb/daed/$name"
-    [ -f "$dst" ] && return 0
-    dl=""
-    if command -v curl >/dev/null 2>&1; then
-        dl="curl -fsSL --connect-timeout 15 --max-time 180"
-    elif command -v busybox >/dev/null 2>&1 && busybox wget --help >/dev/null 2>&1; then
-        dl="busybox wget -q -O"
-    else
-        echo "$(date): WARN: no curl/wget available; cannot download $name" >> "$LOG_FILE"
-        return 1
-    fi
-    echo "$(date): downloading $name ..." >> "$LOG_FILE"
-    if $dl "$url" "$dst.tmp" 2>>"$LOG_FILE"; then
-        mv "$dst.tmp" "$dst"
-        echo "$(date): downloaded $name ($(wc -c < "$dst") bytes)" >> "$LOG_FILE"
-    else
-        rm -f "$dst.tmp"
-        echo "$(date): WARN: failed to download $name; place it at $dst manually if geosite/geoip rules fail" >> "$LOG_FILE"
-        return 1
-    fi
-}
-download_geo_data geosite.dat "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
-download_geo_data geoip.dat "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
-
-# Launch daed in background with logging
+# This comes before the geo refresh on purpose: the bundled data was already
+# expanded at install time, so daed starts with working rules, and a missing
+# or stale copy is repaired behind it rather than in front of it.
 nohup "$DAED_BIN" run -c /data/adb/daed >> "$LOG_FILE" 2>&1 &
+
+# Repair/refresh the geo data in a detached process.
+SELF="$MODPATH/service.sh"
+if [ -f "$SELF" ]; then
+    nohup sh "$SELF" --geo-refresh >> "$LOG_FILE" 2>&1 &
+fi

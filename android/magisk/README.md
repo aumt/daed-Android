@@ -29,10 +29,15 @@ daed Android Magisk 模块版本，可在已 root 的 Android 设备上以 Magis
 
 ## 🗂️ Geo 数据（geosite / geoip）
 
-dae 的路由规则依赖 `geosite.dat` 和 `geoip.dat`（例如 `geosite:cn`、`geoip:cn`、`geoip:private`）。模块未内置这两份文件，`service.sh` 会在开机自启时检测缺失并自动从 v2fly 官方 Release 下载到配置目录 `/data/adb/daed/`（dae 会在此目录查找）。
+dae 的路由规则依赖 `geosite.dat` 和 `geoip.dat`（例如 `geosite:cn`、`geoip:cn`、`geoip:private`），dae 只会从配置目录 `/data/adb/daed/` 查找这两份文件。
 
-- 下载源：`v2fly/domain-list-community`（→ `geosite.dat`）与 `v2fly/geoip`（→ `geoip.dat`），与 dae-core 解码格式一致
-- 下载为 best-effort：若开机时网络未就绪导致下载失败，daed 仍会启动（此时若路由规则引用 geosite/geoip 则 reload 会失败并回滚），可在网络恢复后重启设备，或手动放置文件：
+**模块已内置这两份数据**（gzip 压缩，约 5 MB），刷入时由 `customize.sh` 自动解压到 `/data/adb/daed/` —— 因此**装完即可离线使用 geosite/geoip 规则**，不再依赖开机时的网络。
+
+- 数据源：`v2fly/domain-list-community`（→ `geosite.dat`）与 `v2fly/geoip`（→ `geoip.dat`），与 dae-core 解码格式一致
+- 内置数据随模块版本刷新：仅当刷入的模块版本变化时才重新解压，重刷同一版本不会覆盖你手动更新过的文件
+- **开机兜底**：`service.sh` 在后台检查，文件缺失时先解压内置副本，仍失败则从 v2fly 下载（跨数分钟重试，等待 WiFi 就绪）
+
+**手动更新**：内置数据要等刷入新版本模块才会刷新。想立刻用上最新数据可手动下载 —— 之后需要重启设备、或开关一次磁贴让配置重新加载，daed 不会自动重载 geo 数据：
 
 ```bash
 su -c 'curl -L -o /data/adb/daed/geosite.dat https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat'

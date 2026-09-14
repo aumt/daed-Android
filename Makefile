@@ -92,6 +92,11 @@ magisk:
 	else \
 		echo "WARNING: $(MAGISK_WEB_DIST) not found, skipping web assets (daed binary may have web embedded)"; \
 	fi
+	# geosite/geoip data, bundled gzip-compressed so a fresh install has
+	# working geosite:/geoip: rules offline. customize.sh expands it into
+	# /data/adb/daed at install time. Shares its sources with the boot-time
+	# fallback in service.sh.
+	sh scripts/fetch-geo-data.sh "$(VERSION)"
 	@echo "Magisk module staged at $(MAGISK_DIR)/"
 
 magisk-zip: magisk

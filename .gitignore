@@ -26,3 +26,7 @@ dist-ssr
 
 # Make
 daed
+
+# Magisk module zip, written to the repo root by `make magisk-zip`
+daed-magisk-*.zip
+daed-magisk-*.zip.dgst
