@@ -53,7 +53,7 @@ daed run -c /data/adb/daed
 ```
 
 - 监听地址：`http://127.0.0.1:2023`
-- 脚本内置重复启动保护（通过 `pgrep`/`pidof` 检测已有进程），无需担心多次执行导致端口冲突
+- 现在通过 `system/bin/daed-start` 启动：内置重复启动保护（`pgrep -x daed`），启动后还会校验 WAN 绑定是否正确；若磁贴里把 daed 关掉了（存在 `/data/adb/daed/.dae-stopped`），开机不会自动拉起
 - 如需手动启动，可在终端执行：
 
 ```bash
@@ -62,16 +62,42 @@ su -c 'daed run -c /data/adb/daed &'
 
 ## 🎛️ 快捷设置磁贴（Quick-Settings Tile）
 
-模块以系统应用形式安装一个 `dae` 磁贴，可快捷开关 dae 代理：
+模块以系统应用形式安装一个 `dae` 磁贴，可快捷开关 **daed 守护进程**（dae 代理 + WebUI）：
 
-- **点按磁贴**：开启 / 关闭 **dae 代理**（daed 的 WebUI 服务保持运行，不随代理停止）
+- **点按磁贴**：开启 / 关闭 **daed 守护进程**（dae 代理 + WebUI）
+  - 开启 = 全新启动 daed：会重新探测并绑定当前上网网卡，修复“WebUI、节点延迟都正常但代理静默失效”的状态
+  - 关闭 = 停掉整个守护进程（WebUI 一并停止），并记住该状态（重启后不再自启）
+  - 若守护进程在运行、只是代理被 WebUI 停掉，点按则只开启代理（`SIGUSR2`，面板保持运行）
 - **长按磁贴**：打开 WebUI `http://127.0.0.1:2023`（服务监听 `0.0.0.0:2023`）。
-- 磁贴图标实时反映代理状态（亮 = 运行中，暗 = 已停止）
+- 磁贴图标实时反映代理状态（亮 = 正在代理，暗 = 未代理或守护进程未运行）
 - **无桌面图标**：磁贴应用不注册启动器入口，只在快捷设置中作为磁贴存在
 
 > 说明：Android 的 `TileService` 没有 `onLongClick` 钩子——长按磁贴由系统处理。模块在无 UI 的 `MainActivity` 上注册 `QS_TILE_PREFERENCES` 入口：经测试ColorOS 长按直接拉起该活动打开 WebUI，原生 Android 尚未测试。磁贴应用会在系统启动时自动注册（`BOOT_COMPLETED`），无需用户先手动打开应用。
 
 **添加磁贴：** 下拉通知栏 → 快捷设置 → 点击编辑 → 把 `dae` 磁贴拖入。首次点按需要授予 root 权限，允许一次后即可静默工作。
+
+
+## 🩺 自愈看门狗（daed-watchdog）
+
+开机由 `service.sh` 启动 `system/bin/daed-watchdog`，它会在下列两种情况自动重启 daed（`daed-stop` + `daed-start`）：
+
+- **守护进程消失**：崩溃、被 OOM 或被手动杀掉；
+- **WAN 绑定失效**：Android 会重建移动数据网卡（`rmnet_data4` → `rmnet_data3/5`）并改变默认路由，而 dae 只在每次控制面构建时解析一次 WAN/LAN 网卡，于是它的 tc/eBPF 钩子留在旧网卡上 —— 应用流量不再被捕获，代理静默失效，而 WebUI、节点健康检查、日志看起来一切正常。
+
+重启前会检查 `dae0` 的收发计数：连续约 15 秒没有流量才动手，避免打断正在进行的下载；两次修复之间有 10 分钟冷却。用户在磁贴里“关闭”期间（`.dae-stopped` 标记存在）看门狗完全不动作。
+
+日志：`/data/adb/daed/watchdog.log`；`daed-start` 还会打印“默认路由网卡 vs dae 实际绑定的 WAN 网卡”的对比，便于确认绑定是否正确。
+
+## 🧰 模块内脚本
+
+| 脚本 | 作用 |
+| --- | --- |
+| `system/bin/daed-start` | 启动 daemon（`setsid` 后台，含重复启动保护）、等待 WebUI 就绪、必要时开代理、确保看门狗在跑、校验 WAN 绑定 |
+| `system/bin/daed-stop` | `SIGTERM` 优雅停止（超时 `SIGKILL`）并写入关闭标记 |
+| `system/bin/daed-watchdog` | 空闲时自愈：进程消失 / WAN 绑定失效 |
+| `system/bin/daed-open` | 打开 WebUI |
+
+磁贴点按时调用同一对 `daed-start` / `daed-stop`，因此手动点按与自动修复的行为完全一致。
 
 **没看到磁贴？** 刷入模块并重启后，若快捷设置编辑列表里仍没有 `dae` 磁贴，手动安装一次磁贴应用即可（模块在安装时和开机时已尝试自动安装，以下命令为兜底）：
 

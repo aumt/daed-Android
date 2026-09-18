@@ -7,7 +7,18 @@ import android.service.quicksettings.TileService;
 
 /**
  * Quick Settings tile for daed:
- *   tap -> toggle the dae proxy on/off (the daed web UI keeps running)
+ *   tap -> switch the daed daemon on/off
+ *            on : start the daemon (dae proxy + web UI). A fresh start
+ *                 re-detects the network interfaces, which repairs the
+ *                 "panel healthy, proxy silently dead" state that appears
+ *                 after Android re-creates the mobile-data interface.
+ *            off: stop the daemon (proxy and web UI) and remember it, so
+ *                 service.sh does not autostart it on the next boot.
+ *          Special case: daemon already running but the proxy was stopped
+ *          from the web UI -> tap starts the proxy again (SIGUSR2) instead of
+ *          pointlessly restarting the daemon.
+ *
+ * The tile is lit while dae is proxying.
  *
  * Long-press has no onLongClick hook in TileService: Android shows the
  * system's tile-detail sheet instead, which exposes a gear entry into the
@@ -18,7 +29,11 @@ import android.service.quicksettings.TileService;
  */
 public class DaedTileService extends TileService {
 
-    private static final long RECHECK_DELAY_MS = 1500;
+    /**
+     * Starting the daemon takes a few seconds (veth + eBPF + routing + web
+     * UI), so re-check the state a bit later than for a plain signal toggle.
+     */
+    private static final long RECHECK_DELAY_MS = 4000;
 
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private boolean mBusy;
@@ -41,22 +56,26 @@ public class DaedTileService extends TileService {
         mBusy = true;
         setTileState(Tile.STATE_UNAVAILABLE, R.string.tile_busy);
         // Root commands can block on the Magisk superuser dialog on first use,
-        // so run off the main thread and post the result back.
+        // and daed-start waits for the web UI, so run off the main thread and
+        // post the result back.
         new Thread(() -> {
             final boolean ok;
-            if (!Daedctl.isDaedRunning()) {
+            if (!Daedctl.isDaemonRunning()) {
+                // Switched off (or died): start the whole daemon.
                 ok = Daedctl.startDaemon();
             } else if (Daedctl.isProxyRunning()) {
-                ok = Daedctl.stopProxy();
+                // Running: switch the daemon off.
+                ok = Daedctl.stopDaemon();
             } else {
+                // Daemon up but the proxy was stopped in the web UI.
                 ok = Daedctl.startProxy();
             }
             mHandler.post(() -> {
                 mBusy = false;
                 if (ok) {
                     refresh(); // optimistic
-                    // The proxy (or its marker) settles shortly after the
-                    // signal lands; re-check once.
+                    // The proxy state (or the process) settles shortly after
+                    // the command lands; re-check once.
                     mHandler.postDelayed(this::refresh, RECHECK_DELAY_MS);
                 } else {
                     setTileState(Tile.STATE_INACTIVE, R.string.tile_failed);

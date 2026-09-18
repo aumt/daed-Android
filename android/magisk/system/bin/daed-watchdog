@@ -1,0 +1,151 @@
+#!/system/bin/sh
+# daed-watchdog -- keep daed usable without user interaction.
+#
+# Two failure modes are repaired, both observed on device:
+#
+#  1. the daemon is gone (crash, OOM kill, manual kill);
+#  2. the daemon is alive but its WAN binding went stale. Android re-creates
+#     the mobile-data interface (rmnet_data4 -> rmnet_data3/5) and changes
+#     which interface carries the default route; dae resolves its WAN/LAN
+#     interface set once per control-plane build, so its tc/eBPF hooks stay on
+#     the old interfaces. App traffic is then never captured and the proxy
+#     silently stops working while the web UI, the node health checks and the
+#     logs all still look healthy.
+#
+# Repair is a daemon *restart* (daed-stop + daed-start): a fresh start
+# re-detects the interfaces. A reload is deliberately not used -- it does not
+# reliably rebind, cuts in-flight connections and can wedge the datapath
+# ("handleConn: failed to retrieve target info ... context canceled").
+#
+# Repairs are deferred while traffic is flowing (dae0 counters moving) so an
+# in-flight download is not interrupted, rate-limited by a cooldown, and
+# skipped entirely while the user switched the daemon off (marker file).
+#
+# Usage: daed-watchdog [interval_seconds] [--once]
+
+DIR="${DAED_DIR:-/data/adb/daed}"
+BIN_DIR="${DAED_BIN_DIR:-/data/adb/modules/daed/system/bin}"
+LOG="$DIR/daed.log"
+MARKER="$DIR/.dae-stopped"
+WLOG="$DIR/watchdog.log"
+LASTHEAL="$DIR/.watchdog-last-heal"
+DAE0_STATS="/sys/class/net/dae0/statistics"
+
+INTERVAL=30
+ONCE=0
+for a in "$@"; do
+    case "$a" in
+        --once) ONCE=1 ;;
+        *[!0-9]*) ;;
+        "") ;;
+        *) INTERVAL="$a" ;;
+    esac
+done
+
+HEAL_COOLDOWN=600   # minimum seconds between two repairs
+IDLE_SAMPLES=3      # idle means this many samples (x IDLE_SAMPLE_SEC) without
+IDLE_SAMPLE_SEC=5   # any dae0 traffic
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [watchdog] $*" >>"$WLOG" 2>/dev/null; }
+
+daemon_pid() { pgrep -x daed 2>/dev/null | head -1; }
+
+ui_ok() {
+    [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:2023/ 2>/dev/null)" = "200" ]
+}
+
+dae0_counters() {
+    rx=$(cat "$DAE0_STATS/rx_bytes" 2>/dev/null)
+    tx=$(cat "$DAE0_STATS/tx_bytes" 2>/dev/null)
+    echo "${rx:-x}:${tx:-x}"
+}
+
+# 0 when dae0 carried no traffic for IDLE_SAMPLES x IDLE_SAMPLE_SEC seconds.
+# When dae0 does not exist at all (no proxy datapath) this reports idle, which
+# is what we want: there is nothing in flight to protect.
+dae0_idle() {
+    prev=$(dae0_counters)
+    n=0
+    while [ "$n" -lt "$IDLE_SAMPLES" ]; do
+        sleep "$IDLE_SAMPLE_SEC"
+        cur=$(dae0_counters)
+        [ "$cur" != "$prev" ] && return 1
+        prev="$cur"
+        n=$((n + 1))
+    done
+    return 0
+}
+
+# Interfaces that currently carry a default route. Android's netd keeps the
+# per-network default route in its own table, so the main table is not enough.
+default_ifaces() {
+    ip route show table all 2>/dev/null | grep '^default' \
+        | sed -n 's/.*dev \([a-zA-Z0-9_.-]*\).*/\1/p' | sort -u
+}
+
+# Interfaces the last control-plane build bound as WAN. Each build logs
+# "Health check will only verify ..." right before a contiguous block of
+# "Bind to LAN/WAN: <iface>" lines, so the last such line is a reliable
+# generation boundary.
+bound_wan_ifaces() {
+    hc=$(grep -n 'Health check will only verify' "$LOG" 2>/dev/null | tail -1 | cut -d: -f1)
+    [ -n "$hc" ] || return 0
+    tail -n +"$hc" "$LOG" 2>/dev/null | grep 'Bind to WAN' \
+        | sed 's/.*Bind to WAN: //' | tr -d '"' | sort -u
+}
+
+# Default-route interfaces that dae is *not* capturing.
+stale_ifaces() {
+    bound=" $(bound_wan_ifaces | tr '\n' ' ') "
+    for d in $(default_ifaces); do
+        case "$bound" in
+            *" $d "*) ;;
+            *) echo "$d" ;;
+        esac
+    done
+}
+
+cooldown_ok() {
+    [ -f "$LASTHEAL" ] || return 0
+    last=$(cat "$LASTHEAL" 2>/dev/null)
+    case "$last" in
+        ""|*[!0-9]*) return 0 ;;
+    esac
+    now=$(date +%s)
+    [ $((now - last)) -ge "$HEAL_COOLDOWN" ]
+}
+
+heal() {
+    reason="$1"
+    log "repair: $reason"
+    date +%s >"$LASTHEAL" 2>/dev/null
+    "$BIN_DIR/daed-stop" >>"$WLOG" 2>&1
+    "$BIN_DIR/daed-start" >>"$WLOG" 2>&1
+    log "repair done: $(daemon_pid)"
+}
+
+log "watchdog started (interval=${INTERVAL}s, cooldown=${HEAL_COOLDOWN}s)"
+
+while true; do
+    if [ -f "$MARKER" ]; then
+        : # switched off by the user: stay out of the way
+    elif [ -z "$(daemon_pid)" ]; then
+        heal "daemon not running"
+    elif ! ui_ok; then
+        heal "web UI not answering on 127.0.0.1:2023"
+    else
+        stale=$(stale_ifaces)
+        if [ -n "$stale" ]; then
+            if ! cooldown_ok; then
+                log "stale WAN binding:$stale (cooldown active, waiting)"
+            elif dae0_idle; then
+                heal "stale WAN binding:$(echo "$stale" | tr '\n' ' ')"
+            else
+                log "stale WAN binding:$stale but traffic is flowing; deferring"
+            fi
+        fi
+    fi
+
+    [ "$ONCE" = "1" ] && exit 0
+    sleep "$INTERVAL"
+done

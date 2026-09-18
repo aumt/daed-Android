@@ -1,0 +1,44 @@
+#!/system/bin/sh
+# daed-stop -- stop the daed daemon (dae proxy *and* web UI) and remember it.
+#
+# Shutdown is graceful first (SIGTERM): daed detaches its BPF hooks and removes
+# the dae0 veth itself, which is what keeps the kernel datapath clean. SIGKILL
+# is only a fallback for a wedged process.
+#
+# The marker file .dae-stopped records "the user switched this off", so
+# service.sh does not autostart the daemon on the next boot and daed-watchdog
+# leaves it alone. daed-start (and tapping the tile back on) clears it again.
+#
+# Exit code 0 when no daed process is left.
+
+DIR="${DAED_DIR:-/data/adb/daed}"
+MARKER="$DIR/.dae-stopped"
+WLOG="$DIR/watchdog.log"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [daed-stop] $*" >>"$WLOG" 2>/dev/null; }
+
+if ! pgrep -x daed >/dev/null 2>&1; then
+    echo "daed-stop: daemon not running"
+    touch "$MARKER" 2>/dev/null
+    exit 0
+fi
+
+log "stopping daemon (SIGTERM)"
+pkill -15 -x daed
+i=0
+while [ "$i" -lt 20 ]; do
+    pgrep -x daed >/dev/null 2>&1 || break
+    sleep 0.5
+    i=$((i + 1))
+done
+
+if pgrep -x daed >/dev/null 2>&1; then
+    log "SIGTERM timed out; sending SIGKILL"
+    pkill -9 -x daed
+    sleep 1
+fi
+
+touch "$MARKER" 2>/dev/null
+echo "daed-stop: stopped (marker written, daemon_alive=$(pgrep -x daed | wc -l))"
+log "stopped; marker written"
+exit 0

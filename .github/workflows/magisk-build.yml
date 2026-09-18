@@ -173,8 +173,8 @@ jobs:
           mkdir -p android/magisk/system/bin
           cp wing/daed-android-arm64 android/magisk/system/bin/daed
           chmod 755 android/magisk/system/bin/daed
-          # Quick-Settings tile as a system app (toggles the dae proxy on tap,
-          # opens the web UI on long-press).
+          # Quick-Settings tile as a system app (starts/stops the daed daemon
+          # on tap, opens the web UI on long-press).
           mkdir -p android/magisk/system/app/DaedTile
           cp android/tile/build/daed-tile.apk android/magisk/system/app/DaedTile/DaedTile.apk
           # Inject the build version into module.prop
@@ -222,6 +222,15 @@ jobs:
           else
             echo "ERROR: DaedTile.apk missing" && exit 1
           fi
+          # Ensure the daemon helpers ship with the zip: service.sh, the tile
+          # and daed-watchdog all call them by path.
+          for helper in daed-start daed-stop daed-watchdog; do
+            if unzip -l daed-magisk-$VERSION.zip | grep -q "system/bin/$helper"; then
+              echo "OK: system/bin/$helper present"
+            else
+              echo "ERROR: system/bin/$helper missing" && exit 1
+            fi
+          done
           # Ensure the bundled geo data is present: it is what makes
           # geosite:/geoip: rules work on the first boot, offline.
           for geo in geo/geosite.dat.gz geo/geoip.dat.gz geo/VERSION; do
@@ -259,7 +268,9 @@ jobs:
 
           ## Quick-Settings tile
           The module installs a \`dae\` system app with a Quick-Settings tile:
-          · Tap the tile → start / stop the dae proxy (the web UI keeps running)
+          · Tap the tile → start / stop the daed daemon (proxy + web UI).
+          Starting it is a fresh start: it re-detects the network interfaces and
+          repairs the panel-healthy-but-proxy-dead state.
           · Long-press the tile → open the web UI at http://127.0.0.1:2023 (ColorOS opens it directly; stock Android Haven't tried it yet)
           · No launcher icon — the tile is the only entry point
           Add the tile via Quick Settings → edit (the pencil icon) → drag \`dae\` in.

@@ -208,11 +208,6 @@ if [ -f "$TILE_APK" ] && command -v pm >/dev/null 2>&1; then
     fi
 fi
 
-# Prevent duplicate instances
-if pgrep -f 'daed run' >/dev/null 2>&1 || pidof daed >/dev/null 2>&1; then
-    exit 0
-fi
-
 # Kernel version check: dae requires >= 5.17 (bpf_loop)
 KMAJOR=$(uname -r | cut -d. -f1)
 KMINOR=$(uname -r | cut -d. -f2)
@@ -227,12 +222,31 @@ if [ ! -x "$DAED_BIN" ]; then
     DAED_BIN="daed"
 fi
 
-# Launch daed in background with logging.
+# Start the daemon through the module helper so boot, the Quick-Settings tile
+# and daed-watchdog share one implementation. The helper starts daed detached,
+# waits for the web UI and reports whether dae's WAN binding matches the
+# interfaces that actually carry a default route.
 #
-# This comes before the geo refresh on purpose: the bundled data was already
-# expanded at install time, so daed starts with working rules, and a missing
-# or stale copy is repaired behind it rather than in front of it.
-nohup "$DAED_BIN" run -c /data/adb/daed >> "$LOG_FILE" 2>&1 &
+# The marker left behind by the tile ("switched off") wins over the autostart:
+# the user asked for the daemon to stay down.
+DAED_HELPER_DIR="$MODPATH/system/bin"
+if [ -f "/data/adb/daed/.dae-stopped" ]; then
+    echo "$(date): daed switched off by the user (tile); not autostarting" >> "$LOG_FILE"
+elif [ -x "$DAED_HELPER_DIR/daed-start" ]; then
+    sh "$DAED_HELPER_DIR/daed-start" >> "$LOG_FILE" 2>&1
+else
+    # Fallback for a module zip that predates the helper scripts.
+    nohup "$DAED_BIN" run -c /data/adb/daed >> "$LOG_FILE" 2>&1 &
+fi
+
+# Self-heal loop: repairs a dead daemon, and the stale-WAN-binding failure that
+# kills the proxy silently (Android re-creates the mobile-data interface as
+# rmnet_data<N>, dae keeps its tc/eBPF hooks on the old one, app traffic is no
+# longer captured while the web UI still looks healthy). It no-ops while the
+# daemon is switched off, so start it unconditionally.
+if [ -x "$DAED_HELPER_DIR/daed-watchdog" ] && ! pgrep -f "daed-watchdog" >/dev/null 2>&1; then
+    setsid "$DAED_HELPER_DIR/daed-watchdog" >> "$LOG_FILE" 2>&1 < /dev/null &
+fi
 
 # Repair/refresh the geo data in a detached process.
 SELF="$MODPATH/service.sh"

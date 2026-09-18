@@ -1,0 +1,102 @@
+#!/system/bin/sh
+# daed-start -- start the daed daemon (dae proxy + web UI) and report whether
+# the datapath looks sane.
+#
+# Callers: service.sh (boot), the Quick-Settings tile (tap = on) and
+# daed-watchdog (repair). The daemon is started detached with setsid so it
+# survives the caller: a su shell, a TileService thread, or a boot script.
+#
+# Startup procedure:
+#   1. refuse to start a second instance (pgrep -x daed);
+#   2. wait for the web UI on 127.0.0.1:2023 (the daemon's readiness signal);
+#   3. if the proxy was deliberately stopped (marker file present, the daemon
+#      mirrors its DB "running" flag there at startup), ask dae to run by
+#      sending SIGUSR2 -- the same code path as the web UI's start button;
+#   4. make sure daed-watchdog is running, so a daemon started after boot is
+#      self-healed too;
+#   5. compare the interfaces dae bound as WAN against the interfaces that
+#      actually carry a default route, and warn when the binding is stale.
+#      (Repairing that is daed-watchdog's job; a fresh start normally gets it
+#      right, because the binding is computed once per control-plane build.)
+#
+# Exit code 0 when the daemon is up and the web UI answers, 1 otherwise.
+
+BIN="${DAED_BIN:-/data/adb/modules/daed/system/bin/daed}"
+WATCHDOG="${DAED_WATCHDOG:-/data/adb/modules/daed/system/bin/daed-watchdog}"
+DIR="${DAED_DIR:-/data/adb/daed}"
+LOG="$DIR/daed.log"
+MARKER="$DIR/.dae-stopped"
+WLOG="$DIR/watchdog.log"
+
+log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [daed-start] $*" >>"$WLOG" 2>/dev/null; }
+
+mkdir -p "$DIR" 2>/dev/null
+
+if [ ! -x "$BIN" ]; then
+    echo "daed-start: daed binary missing: $BIN" >&2
+    log "FATAL binary missing: $BIN"
+    exit 1
+fi
+
+if pgrep -x daed >/dev/null 2>&1; then
+    echo "daed-start: already running (pid $(pgrep -x daed | tr '\n' ' '))"
+else
+    log "starting daemon"
+    cd "$DIR" || exit 1
+    setsid "$BIN" run -c "$DIR" >>"$LOG" 2>&1 </dev/null &
+fi
+
+# (2) wait for the web UI
+code=""
+i=0
+while [ "$i" -lt 40 ]; do
+    code=$(curl -s -m 2 -o /dev/null -w '%{http_code}' http://127.0.0.1:2023/ 2>/dev/null)
+    [ "$code" = "200" ] && break
+    sleep 1
+    i=$((i + 1))
+done
+if [ "$code" != "200" ]; then
+    echo "daed-start: web UI did not come up (last http_code=${code:-none})" >&2
+    log "FAILED web UI did not come up (last http_code=${code:-none})"
+    exit 1
+fi
+echo "daed-start: daemon up (pid $(pgrep -x daed | tr '\n' ' ')), web UI http_code=$code"
+
+# (3) proxy stopped in the DB -> request run
+if [ -f "$MARKER" ]; then
+    log "proxy was stopped; requesting run (SIGUSR2)"
+    pkill -12 -x daed >/dev/null 2>&1
+    sleep 2
+fi
+
+# (4) keep the self-heal loop alive
+if [ -x "$WATCHDOG" ] && ! pgrep -f "daed-watchdog" >/dev/null 2>&1; then
+    log "starting watchdog"
+    setsid "$WATCHDOG" >>"$WLOG" 2>&1 </dev/null &
+fi
+
+# (5) binding sanity report
+HC=$(grep -n 'Health check will only verify' "$LOG" 2>/dev/null | tail -1 | cut -d: -f1)
+BOUND=""
+if [ -n "$HC" ]; then
+    BOUND=$(tail -n +"$HC" "$LOG" 2>/dev/null | grep 'Bind to WAN' \
+        | sed 's/.*Bind to WAN: //' | tr -d '"' | sort -u | tr '\n' ' ')
+fi
+DEFAULT_IFS=$(ip route show table all 2>/dev/null | grep '^default' \
+    | sed -n 's/.*dev \([a-zA-Z0-9_.-]*\).*/\1/p' | sort -u | tr '\n' ' ')
+echo "daed-start: default-route ifaces: [$DEFAULT_IFS]"
+echo "daed-start: bound WAN ifaces:     [$BOUND]"
+
+STALE=""
+for d in $DEFAULT_IFS; do
+    case " $BOUND " in
+        *" $d "*) ;;
+        *) STALE="$STALE $d" ;;
+    esac
+done
+if [ -n "$STALE" ]; then
+    echo "daed-start: WARNING not bound as WAN:$STALE"
+    log "WARN default-route iface(s) not bound as WAN:$STALE"
+fi
+
+exit 0
