@@ -1,50 +1,95 @@
 #!/system/bin/sh
 # daed-watchdog -- keep daed usable without user interaction.
 #
-# Two failure modes are repaired, both observed on device:
+# The watchdog does NOT restart anything on a schedule. Every INTERVAL seconds
+# it only *reads* state; a repair happens when one of these is true:
 #
-#  1. the daemon is gone (crash, OOM kill, manual kill);
-#  2. the daemon is alive but its WAN binding went stale. Android re-creates
-#     the mobile-data interface (rmnet_data4 -> rmnet_data3/5) and changes
-#     which interface carries the default route; dae resolves its WAN/LAN
-#     interface set once per control-plane build, so its tc/eBPF hooks stay on
-#     the old interfaces. App traffic is then never captured and the proxy
-#     silently stops working while the web UI, the node health checks and the
-#     logs all still look healthy.
+#   * the daemon is gone (crash, OOM kill, manual kill);
+#   * the web UI on 127.0.0.1:2023 stopped answering;
+#   * the WAN binding went stale: Android re-creates the mobile-data interface
+#     (rmnet_data4 -> rmnet_data3/5) and moves the default route with it, while
+#     dae resolves its WAN/LAN interface set once per control-plane build. Its
+#     tc/eBPF hooks then sit on interfaces nothing flows through any more:
+#     app traffic is never captured, the proxy dies silently, and the web UI,
+#     the node health checks and the logs all still look healthy.
 #
-# Repair is a daemon *restart* (daed-stop + daed-start): a fresh start
-# re-detects the interfaces. A reload is deliberately not used -- it does not
-# reliably rebind, cuts in-flight connections and can wedge the datapath
+# A repair is a daemon *restart* (daed-stop + daed-start); a fresh start
+# re-detects the interfaces. A reload is deliberately not used: it does not
+# reliably rebind, it cuts in-flight connections and it can wedge the datapath
 # ("handleConn: failed to retrieve target info ... context canceled").
 #
-# Repairs are deferred while traffic is flowing (dae0 counters moving) so an
-# in-flight download is not interrupted, rate-limited by a cooldown, and
-# skipped entirely while the user switched the daemon off (marker file).
+# What counts as "stale": a default-route interface that dae did not bind.
+# Two refinements keep that honest on this device:
+#
+#   * IGNORE_IFACES (default wlan0): Wi-Fi is normally NOT a proxied uplink
+#     here, so its default route must not look like a fault. The ignore list
+#     only applies while the interface is absent from the dae config -- select
+#     wlan0 in the web UI's interface list (the occasional "also proxy Wi-Fi"
+#     case, which writes it into lan_interface/wan_interface), and it is
+#     required to be bound again. If your Wi-Fi proxying instead happens purely
+#     through the auto-detected WAN set, drop wlan0 from IGNORE_IFACES to have
+#     the watchdog verify it too.
+#   * STALE_GRACE: an interface must stay uncovered that long before it
+#     counts, so a route/Wi-Fi flap cannot trigger a restart.
+#
+# Guard rails, so the cure is never worse than the disease:
+#   * repairs are skipped while the user switched the daemon off (marker file);
+#   * a repair waits until dae0 has carried no traffic for IDLE_SAMPLES x
+#     IDLE_SAMPLE_SEC seconds, so an in-flight download is not interrupted;
+#   * at least HEAL_COOLDOWN seconds between two repairs;
+#   * if a repair does not actually clear the staleness (an interface dae never
+#     binds, say), the watchdog backs off for BACKOFF seconds instead of
+#     retrying every HEAL_COOLDOWN.
+#
+# Optional config: /data/adb/daed/watchdog.conf, plain KEY=VALUE lines, e.g.
+#     WATCH_INTERVAL=30
+#     HEAL_COOLDOWN=600
+#     STALE_GRACE=300
+#     BACKOFF=21600
+#     IDLE_SAMPLES=3
+#     IDLE_SAMPLE_SEC=5
+#     IGNORE_IFACES="wlan0 eth0"
+#     CONFIG_IFACE_KEYS="wan_interface lan_interface"
 #
 # Usage: daed-watchdog [interval_seconds] [--once]
 
 DIR="${DAED_DIR:-/data/adb/daed}"
 BIN_DIR="${DAED_BIN_DIR:-/data/adb/modules/daed/system/bin}"
+DB="$DIR/wing.db"
 LOG="$DIR/daed.log"
 MARKER="$DIR/.dae-stopped"
 WLOG="$DIR/watchdog.log"
+CONF="$DIR/watchdog.conf"
 LASTHEAL="$DIR/.watchdog-last-heal"
+BACKOFF_UNTIL="$DIR/.watchdog-backoff-until"
+UNCOVERED="$DIR/.watchdog-uncovered"
 DAE0_STATS="/sys/class/net/dae0/statistics"
 
-INTERVAL=30
+WATCH_INTERVAL=30
+HEAL_COOLDOWN=600
+STALE_GRACE=300
+BACKOFF=21600
+IDLE_SAMPLES=3
+IDLE_SAMPLE_SEC=5
+# This device: Wi-Fi (wlan0) is not a proxied uplink unless it is written into
+# the dae config by hand -- see config_iface_listed() below.
+IGNORE_IFACES="wlan0"
+# Interface settings inside the dae config that daed keeps in its database.
+# Both are "auto" or a comma-separated list of interface names:
+#   wan_interface -- upstream interfaces dae proxies through (WAN 接口)
+#   lan_interface -- interfaces dae accepts traffic from (LAN 接口)
+CONFIG_IFACE_KEYS="${CONFIG_IFACE_KEYS:-wan_interface lan_interface}"
+[ -f "$CONF" ] && . "$CONF"
+
 ONCE=0
 for a in "$@"; do
     case "$a" in
         --once) ONCE=1 ;;
         *[!0-9]*) ;;
         "") ;;
-        *) INTERVAL="$a" ;;
+        *) WATCH_INTERVAL="$a" ;;
     esac
 done
-
-HEAL_COOLDOWN=600   # minimum seconds between two repairs
-IDLE_SAMPLES=3      # idle means this many samples (x IDLE_SAMPLE_SEC) without
-IDLE_SAMPLE_SEC=5   # any dae0 traffic
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [watchdog] $*" >>"$WLOG" 2>/dev/null; }
 
@@ -61,8 +106,7 @@ dae0_counters() {
 }
 
 # 0 when dae0 carried no traffic for IDLE_SAMPLES x IDLE_SAMPLE_SEC seconds.
-# When dae0 does not exist at all (no proxy datapath) this reports idle, which
-# is what we want: there is nothing in flight to protect.
+# When dae0 does not exist at all there is nothing in flight to protect either.
 dae0_idle() {
     prev=$(dae0_counters)
     n=0
@@ -78,6 +122,7 @@ dae0_idle() {
 
 # Interfaces that currently carry a default route. Android's netd keeps the
 # per-network default route in its own table, so the main table is not enough.
+# This mirrors what dae itself uses to pick its WAN interfaces.
 default_ifaces() {
     ip route show table all 2>/dev/null | grep '^default' \
         | sed -n 's/.*dev \([a-zA-Z0-9_.-]*\).*/\1/p' | sort -u
@@ -94,15 +139,52 @@ bound_wan_ifaces() {
         | sed 's/.*Bind to WAN: //' | tr -d '"' | sort -u
 }
 
-# Default-route interfaces that dae is *not* capturing.
-stale_ifaces() {
-    bound=" $(bound_wan_ifaces | tr '\n' ' ') "
-    for d in $(default_ifaces); do
-        case "$bound" in
-            *" $d "*) ;;
-            *) echo "$d" ;;
-        esac
+# True when this interface is named in one of the dae config's interface
+# lists (wan_interface / lan_interface, stored as JSON-ish text in daed's
+# sqlite database). The web UI writes those lists when you pick interfaces in
+# its selector; "auto" is not a name, so an interface shows up here only when
+# it was actually chosen.
+config_iface_listed() {
+    [ -f "$DB" ] || return 1
+    for k in $CONFIG_IFACE_KEYS; do
+        frag=$(grep -a -o "$k:\"[^\"]*\"" "$DB" 2>/dev/null | tail -1)
+        [ -n "$frag" ] || continue
+        printf '%s' "$frag" | grep -q "$1" && return 0
     done
+    return 1
+}
+
+# Default-route interfaces dae is not capturing and that are not ignored.
+uncovered_ifaces() {
+    bound_now=" $(bound_wan_ifaces | tr '\n' ' ') "
+    for d in $(default_ifaces); do
+        case "$bound_now" in
+            *" $d "*) continue ;;
+        esac
+        case " $IGNORE_IFACES " in
+            *" $d "*)
+                # Ignored by default, unless the config asks for it by hand.
+                config_iface_listed "$d" || continue
+                ;;
+        esac
+        echo "$d"
+    done
+}
+
+# Filter uncovered_ifaces down to the ones that stayed uncovered for at least
+# STALE_GRACE seconds (state kept in $UNCOVERED), so a route/Wi-Fi flap does
+# not trigger a restart.
+stale_ifaces() {
+    now=$(date +%s)
+    tmp="$UNCOVERED.new"
+    : >"$tmp" 2>/dev/null
+    for d in $(uncovered_ifaces); do
+        since=$(awk -v i="$d" '$1 == i { print $2; exit }' "$UNCOVERED" 2>/dev/null)
+        [ -n "$since" ] || since=$now
+        printf '%s %s\n' "$d" "$since" >>"$tmp"
+        [ $((now - since)) -ge "$STALE_GRACE" ] && echo "$d"
+    done
+    mv "$tmp" "$UNCOVERED" 2>/dev/null
 }
 
 cooldown_ok() {
@@ -111,8 +193,16 @@ cooldown_ok() {
     case "$last" in
         ""|*[!0-9]*) return 0 ;;
     esac
-    now=$(date +%s)
-    [ $((now - last)) -ge "$HEAL_COOLDOWN" ]
+    [ $(( $(date +%s) - last )) -ge "$HEAL_COOLDOWN" ]
+}
+
+in_backoff() {
+    [ -f "$BACKOFF_UNTIL" ] || return 1
+    until_ts=$(cat "$BACKOFF_UNTIL" 2>/dev/null)
+    case "$until_ts" in
+        ""|*[!0-9]*) return 1 ;;
+    esac
+    [ "$(date +%s)" -lt "$until_ts" ]
 }
 
 heal() {
@@ -121,10 +211,25 @@ heal() {
     date +%s >"$LASTHEAL" 2>/dev/null
     "$BIN_DIR/daed-stop" >>"$WLOG" 2>&1
     "$BIN_DIR/daed-start" >>"$WLOG" 2>&1
-    log "repair done: $(daemon_pid)"
+
+    # Did it work? Staleness that survives a fresh start is not something a
+    # restart loop can fix (e.g. an interface dae never binds): back off.
+    sleep 5
+    rm -f "$UNCOVERED" 2>/dev/null
+    if [ -n "$(uncovered_ifaces)" ]; then
+        log "repair did not clear:$(uncovered_ifaces | tr '\n' ' ') -- backing off ${BACKOFF}s"
+        echo $(( $(date +%s) + BACKOFF )) >"$BACKOFF_UNTIL" 2>/dev/null
+    else
+        rm -f "$BACKOFF_UNTIL" 2>/dev/null
+    fi
+    log "repair done: pid=$(daemon_pid) uncovered=[$(uncovered_ifaces | tr '\n' ' ')]"
 }
 
-log "watchdog started (interval=${INTERVAL}s, cooldown=${HEAL_COOLDOWN}s)"
+log "watchdog started (interval=${WATCH_INTERVAL}s, cooldown=${HEAL_COOLDOWN}s, grace=${STALE_GRACE}s, backoff=${BACKOFF}s, ignore=[$IGNORE_IFACES], keys=[$CONFIG_IFACE_KEYS])"
+for k in $CONFIG_IFACE_KEYS; do
+    v=$(grep -a -o "$k:\"[^\"]*\"" "$DB" 2>/dev/null | tail -1)
+    log "config: ${v:-$k=<not found>}"
+done
 
 while true; do
     if [ -f "$MARKER" ]; then
@@ -134,18 +239,22 @@ while true; do
     elif ! ui_ok; then
         heal "web UI not answering on 127.0.0.1:2023"
     else
-        stale=$(stale_ifaces)
-        if [ -n "$stale" ]; then
-            if ! cooldown_ok; then
-                log "stale WAN binding:$stale (cooldown active, waiting)"
-            elif dae0_idle; then
-                heal "stale WAN binding:$(echo "$stale" | tr '\n' ' ')"
-            else
-                log "stale WAN binding:$stale but traffic is flowing; deferring"
+        if in_backoff; then
+            : # a previous repair did not help; stay quiet until the deadline
+        else
+            stale=$(stale_ifaces)
+            if [ -n "$stale" ]; then
+                if ! cooldown_ok; then
+                    log "stale WAN binding:$(echo "$stale" | tr '\n' ' ') (cooldown active)"
+                elif dae0_idle; then
+                    heal "stale WAN binding:$(echo "$stale" | tr '\n' ' ')"
+                else
+                    log "stale WAN binding:$(echo "$stale" | tr '\n' ' ') but traffic is flowing; deferring"
+                fi
             fi
         fi
     fi
 
     [ "$ONCE" = "1" ] && exit 0
-    sleep "$INTERVAL"
+    sleep "$WATCH_INTERVAL"
 done

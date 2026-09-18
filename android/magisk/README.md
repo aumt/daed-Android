@@ -88,6 +88,27 @@ su -c 'daed run -c /data/adb/daed &'
 
 日志：`/data/adb/daed/watchdog.log`；`daed-start` 还会打印“默认路由网卡 vs dae 实际绑定的 WAN 网卡”的对比，便于确认绑定是否正确。
 
+**它不会定时重启**：每 `WATCH_INTERVAL`（默认 30s）只读一次状态，只有“进程没了 / WebUI 不响应 / WAN 绑定失效”才动手，并且：
+
+- **空闲门槛**：`dae0` 连续 `IDLE_SAMPLES × IDLE_SAMPLE_SEC`（默认 3×5s）没有流量才重启，避免打断下载；
+- **冷却**：两次修复至少间隔 `HEAL_COOLDOWN`（默认 600s）；
+- **迟滞**：某网卡必须持续 `STALE_GRACE`（默认 300s）未被绑定才算失效，避免 Wi-Fi/路由抖动触发重启；
+- **事后校验 + 长退避**：修复后若绑定依旧缺失（说明重启也解决不了，例如 dae 本来就不绑该网卡），则退避 `BACKOFF`（默认 6h），不会每 10 分钟重启一次；
+- **忽略名单**：`IGNORE_IFACES`（默认 `wlan0`）里的网卡不参与判定——本机 Wi-Fi 平时不走代理。
+  但只要**你在 WebUI 的接口列表里勾选该网卡**（偶尔想让 Wi-Fi 也走代理的情况），它就会被要求绑定，不再被忽略。
+  判断依据是 `wing.db` 里的接口配置键（默认 `wan_interface`、`lan_interface`，即 WebUI 的「WAN 接口」「LAN 接口」；值为 `auto` 时不包含任何具体网卡名）。键名可用 `CONFIG_IFACE_KEYS` 覆盖。
+  如果你的 Wi-Fi 代理是靠 `auto` 自动探测生效、配置里并不会留下 wlan0，那么想让看门狗也校验它，就把 `wlan0` 从 `IGNORE_IFACES` 里去掉。
+
+以上参数都可写在 `/data/adb/daed/watchdog.conf`（`KEY=VALUE`），例如：
+
+```sh
+WATCH_INTERVAL=30
+HEAL_COOLDOWN=600
+STALE_GRACE=300
+BACKOFF=21600
+IGNORE_IFACES="wlan0"
+```
+
 ## 🧰 模块内脚本
 
 | 脚本 | 作用 |
