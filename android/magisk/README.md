@@ -79,41 +79,66 @@ su -c 'daed run -c /data/adb/daed &'
 
 ## 🩺 自愈看门狗（daed-watchdog）
 
-开机由 `service.sh` 启动 `system/bin/daed-watchdog`，它会在下列两种情况自动重启 daed（`daed-stop` + `daed-start`）：
+开机由 `service.sh` 启动 `system/bin/daed-watchdog`。它**不设定时重启**：每 `WATCH_INTERVAL`（默认 30s）只读一次状态，只在下列情况修复（`daed-stop` + `daed-start`）：
 
 - **守护进程消失**：崩溃、被 OOM 或被手动杀掉；
-- **WAN 绑定失效**：Android 会重建移动数据网卡（`rmnet_data4` → `rmnet_data3/5`）并改变默认路由，而 dae 只在每次控制面构建时解析一次 WAN/LAN 网卡，于是它的 tc/eBPF 钩子留在旧网卡上 —— 应用流量不再被捕获，代理静默失效，而 WebUI、节点健康检查、日志看起来一切正常。
+- **WebUI 不响应**：`127.0.0.1:2023` 拿不到 200；
+- **数据面失效**：流量已经不再被 dae 抓取（即“WebUI、节点延迟都正常，代理却静默失效”那个故障）。
 
-重启前会检查 `dae0` 的收发计数：连续约 15 秒没有流量才动手，避免打断正在进行的下载；两次修复之间有 10 分钟冷却。用户在磁贴里“关闭”期间（`.dae-stopped` 标记存在）看门狗完全不动作。
+### 数据面怎么判定
 
-日志：`/data/adb/daed/watchdog.log`；`daed-start` 还会打印“默认路由网卡 vs dae 实际绑定的 WAN 网卡”的对比，便于确认绑定是否正确。
+既不看日志里的 Bind 行，也不看“能不能打开被墙网站”：
 
-**它不会定时重启**：每 `WATCH_INTERVAL`（默认 30s）只读一次状态，只有“进程没了 / WebUI 不响应 / WAN 绑定失效”才动手，并且：
+- Bind 行是 **info 级**，daemon 首次 reload 后会按配置里的 `log_level` 重建 logger（本机是 `error`），这些行根本不会写进日志；
+- 有些网络直连也能打开被墙站点，此时“探测能通”并不代表代理在工作。
 
-- **空闲门槛**：`dae0` 连续 `IDLE_SAMPLES × IDLE_SAMPLE_SEC`（默认 3×5s）没有流量才重启，避免打断下载；
+所以改为**看效果**：以**非 root 的 uid（2000/shell）**访问一个被路由到代理的站点，同时观察 `dae0` 的收发计数 —— `dae0` 是所有被抓取流量必经的 veth：
+
+| 现象 | 结论 |
+| --- | --- |
+| 页面正常 + `dae0` 计数增长 | 数据面正常 |
+| 页面正常 + `dae0` 计数不动 | 流量绕过了 dae（绑定失效）→ 修复 |
+| 页面失败 + 对照请求（直连可达目标）正常 | 代理链路坏了 → 修复 |
+
+（uid 0 被 Android 补丁豁免，所以探针必须用非 root uid；uid 2000 用不了 netd 的解析器，脚本自己用 8.8.8.8 解析后配 `--resolve`。）
+
+### 安全阀
+
+- **连续两次才动手**：连续 `PROBE_FAILS`（默认 2）次探测异常才进入修复流程；
+- **空闲门槛**：`dae0` 连续 `IDLE_SAMPLES × IDLE_SAMPLE_SEC`（默认 3×5s）没有流量才重启，不打断正在进行的下载；
 - **冷却**：两次修复至少间隔 `HEAL_COOLDOWN`（默认 600s）；
-- **迟滞**：某网卡必须持续 `STALE_GRACE`（默认 300s）未被绑定才算失效，避免 Wi-Fi/路由抖动触发重启；
-- **事后校验 + 长退避**：修复后若绑定依旧缺失（说明重启也解决不了，例如 dae 本来就不绑该网卡），则退避 `BACKOFF`（默认 6h），不会每 10 分钟重启一次；
-- **忽略名单**：`IGNORE_IFACES`（默认 `wlan0`）里的网卡不参与判定——本机 Wi-Fi 平时不走代理。
-  但只要**你在 WebUI 的接口列表里勾选该网卡**（偶尔想让 Wi-Fi 也走代理的情况），它就会被要求绑定，不再被忽略。
-  判断依据是 `wing.db` 里的接口配置键（默认 `wan_interface`、`lan_interface`，即 WebUI 的「WAN 接口」「LAN 接口」；值为 `auto` 时不包含任何具体网卡名）。键名可用 `CONFIG_IFACE_KEYS` 覆盖。
-  如果你的 Wi-Fi 代理是靠 `auto` 自动探测生效、配置里并不会留下 wlan0，那么想让看门狗也校验它，就把 `wlan0` 从 `IGNORE_IFACES` 里去掉。
+- **事后校验 + 长退避**：修复后再探一次；若仍异常（例如节点本身挂了，重启治不了），退避 `BACKOFF`（默认 6h），不会反复重启；
+- **Wi-Fi 闸门**：当 `wlan0` 处于 up 且**没有**出现在 dae 配置的接口列表里时，说明你在用“不代理的 Wi-Fi”，此时不探测、不修复；想让 Wi-Fi 也走代理，就在 WebUI 接口列表里勾选 `wlan0`（会写进 `wing.db` 的 `wan_interface` / `lan_interface`），此后探针照常工作；
+- **用户关闭期间**：`.dae-stopped` 标记存在时完全不动作。
 
-以上参数都可写在 `/data/adb/daed/watchdog.conf`（`KEY=VALUE`），例如：
+日志：`/data/adb/daed/watchdog.log`（每次探测结果与修复原因都在里面）。
+
+### 可调参数
+
+写在 `/data/adb/daed/watchdog.conf`（`KEY=VALUE`）：
 
 ```sh
 WATCH_INTERVAL=30
+PROBE_INTERVAL=300
+PROBE_FAILS=2
 HEAL_COOLDOWN=600
-STALE_GRACE=300
 BACKOFF=21600
+IDLE_SAMPLES=3
+IDLE_SAMPLE_SEC=5
 IGNORE_IFACES="wlan0"
+WIFI_IFACES="wlan0"
+CONFIG_IFACE_KEYS="wan_interface lan_interface"
+PROBE_HOST="www.gstatic.com"
+PROBE_URL="https://www.gstatic.com/generate_204"
+CTRL_HOST="www.baidu.com"
+CTRL_URL="https://www.baidu.com/"
 ```
 
 ## 🧰 模块内脚本
 
 | 脚本 | 作用 |
 | --- | --- |
-| `system/bin/daed-start` | 启动 daemon（`setsid` 后台，含重复启动保护）、等待 WebUI 就绪、必要时开代理、确保看门狗在跑、校验 WAN 绑定 |
+| `system/bin/daed-start` | 启动 daemon（`setsid` 后台，含重复启动保护）、等待 WebUI 就绪、必要时开代理、确保看门狗在跑 |
 | `system/bin/daed-stop` | `SIGTERM` 优雅停止（超时 `SIGKILL`）并写入关闭标记 |
 | `system/bin/daed-watchdog` | 空闲时自愈：进程消失 / WAN 绑定失效 |
 | `system/bin/daed-open` | 打开 WebUI |

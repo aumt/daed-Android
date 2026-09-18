@@ -6,50 +6,63 @@
 #
 #   * the daemon is gone (crash, OOM kill, manual kill);
 #   * the web UI on 127.0.0.1:2023 stopped answering;
-#   * the WAN binding went stale: Android re-creates the mobile-data interface
-#     (rmnet_data4 -> rmnet_data3/5) and moves the default route with it, while
-#     dae resolves its WAN/LAN interface set once per control-plane build. Its
-#     tc/eBPF hooks then sit on interfaces nothing flows through any more:
-#     app traffic is never captured, the proxy dies silently, and the web UI,
-#     the node health checks and the logs all still look healthy.
+#   * the datapath stopped carrying traffic (see the probe below) -- this is
+#     the failure the watchdog exists for: Android re-creates the mobile-data
+#     interface (rmnet_data4 -> rmnet_data3/5) and moves the default route
+#     with it, while dae resolves its WAN/LAN interface set only once per
+#     control-plane build. Its tc/eBPF hooks then sit on interfaces nothing
+#     flows through any more: app traffic is never captured, the proxy dies
+#     silently, and the web UI, the node health checks and the logs all still
+#     look healthy.
 #
 # A repair is a daemon *restart* (daed-stop + daed-start); a fresh start
 # re-detects the interfaces. A reload is deliberately not used: it does not
 # reliably rebind, it cuts in-flight connections and it can wedge the datapath
 # ("handleConn: failed to retrieve target info ... context canceled").
 #
-# What counts as "stale": a default-route interface that dae did not bind.
-# Two refinements keep that honest on this device:
-#
-#   * IGNORE_IFACES (default wlan0): Wi-Fi is normally NOT a proxied uplink
-#     here, so its default route must not look like a fault. The ignore list
-#     only applies while the interface is absent from the dae config -- select
-#     wlan0 in the web UI's interface list (the occasional "also proxy Wi-Fi"
-#     case, which writes it into lan_interface/wan_interface), and it is
-#     required to be bound again. If your Wi-Fi proxying instead happens purely
-#     through the auto-detected WAN set, drop wlan0 from IGNORE_IFACES to have
-#     the watchdog verify it too.
-#   * STALE_GRACE: an interface must stay uncovered that long before it
-#     counts, so a route/Wi-Fi flap cannot trigger a restart.
+# How the datapath probe works (and why not simpler tests):
+#   * "grep the Bind lines" is not usable: they are info-level, and the daemon
+#     rebuilds its logger from the user's log_level after the first reload, so
+#     they disappear (log_level is "error" on this device).
+#   * "can I reach a blocked site" is not usable either: some networks do not
+#     block it, and then a dead proxy still looks healthy.
+#   So the probe measures the effect: fetch a page from a host that the
+#   routing rules send through the proxy, as a *non-root* uid, and watch dae0.
+#   dae0 is the veth every captured flow traverses, hence
+#       page loads, dae0 moved        -> datapath fine
+#       page loads, dae0 stayed at 0 -> traffic bypassed dae (stale binding)
+#       page fails, control request ok -> proxy path broken
+#   uid 0 is exempted from dae by the Android patch, so the probe has to run as
+#   a non-root uid; uid 2000 (shell) is used and needs no resolver of its own -
+#   the IP is resolved here (via 8.8.8.8) and passed with --resolve.
 #
 # Guard rails, so the cure is never worse than the disease:
 #   * repairs are skipped while the user switched the daemon off (marker file);
+#   * probing is skipped while Wi-Fi is up and intentionally not proxied (see
+#     IGNORE_IFACES / CONFIG_IFACE_KEYS below);
+#   * the probe must fail PROBE_FAILS times in a row before anything happens;
 #   * a repair waits until dae0 has carried no traffic for IDLE_SAMPLES x
 #     IDLE_SAMPLE_SEC seconds, so an in-flight download is not interrupted;
 #   * at least HEAL_COOLDOWN seconds between two repairs;
-#   * if a repair does not actually clear the staleness (an interface dae never
-#     binds, say), the watchdog backs off for BACKOFF seconds instead of
-#     retrying every HEAL_COOLDOWN.
+#   * if a repair does not actually fix the probe, the watchdog backs off for
+#     BACKOFF seconds instead of retrying every HEAL_COOLDOWN.
 #
 # Optional config: /data/adb/daed/watchdog.conf, plain KEY=VALUE lines, e.g.
 #     WATCH_INTERVAL=30
+#     PROBE_INTERVAL=300
+#     PROBE_FAILS=2
 #     HEAL_COOLDOWN=600
-#     STALE_GRACE=300
 #     BACKOFF=21600
 #     IDLE_SAMPLES=3
 #     IDLE_SAMPLE_SEC=5
-#     IGNORE_IFACES="wlan0 eth0"
+#     IGNORE_IFACES="wlan0"
+#     WIFI_IFACES="wlan0"
 #     CONFIG_IFACE_KEYS="wan_interface lan_interface"
+#     PROBE_HOST="www.gstatic.com"
+#     PROBE_URL="https://www.gstatic.com/generate_204"
+#     PROBE_EXPECT="204"
+#     CTRL_HOST="www.baidu.com"
+#     CTRL_URL="https://www.baidu.com/"
 #
 # Usage: daed-watchdog [interval_seconds] [--once]
 
@@ -62,23 +75,28 @@ WLOG="$DIR/watchdog.log"
 CONF="$DIR/watchdog.conf"
 LASTHEAL="$DIR/.watchdog-last-heal"
 BACKOFF_UNTIL="$DIR/.watchdog-backoff-until"
-UNCOVERED="$DIR/.watchdog-uncovered"
 DAE0_STATS="/sys/class/net/dae0/statistics"
 
 WATCH_INTERVAL=30
+PROBE_INTERVAL=300
+PROBE_FAILS=2
 HEAL_COOLDOWN=600
-STALE_GRACE=300
 BACKOFF=21600
 IDLE_SAMPLES=3
 IDLE_SAMPLE_SEC=5
-# This device: Wi-Fi (wlan0) is not a proxied uplink unless it is written into
-# the dae config by hand -- see config_iface_listed() below.
+# Wi-Fi is normally not a proxied uplink here; an interface on this list is
+# ignored unless the dae config names it (the occasional "also proxy Wi-Fi"
+# case, where you pick wlan0 in the web UI's interface list).
 IGNORE_IFACES="wlan0"
-# Interface settings inside the dae config that daed keeps in its database.
-# Both are "auto" or a comma-separated list of interface names:
-#   wan_interface -- upstream interfaces dae proxies through (WAN 接口)
-#   lan_interface -- interfaces dae accepts traffic from (LAN 接口)
-CONFIG_IFACE_KEYS="${CONFIG_IFACE_KEYS:-wan_interface lan_interface}"
+WIFI_IFACES="wlan0"
+CONFIG_IFACE_KEYS="wan_interface lan_interface"
+# Probe targets: PROBE_* must be routed through the proxy, CTRL_* must work
+# without the proxy (used to tell "no network" from "proxy broken").
+PROBE_HOST="www.gstatic.com"
+PROBE_URL="https://www.gstatic.com/generate_204"
+PROBE_EXPECT="204"
+CTRL_HOST="www.baidu.com"
+CTRL_URL="https://www.baidu.com/"
 [ -f "$CONF" ] && . "$CONF"
 
 ONCE=0
@@ -99,20 +117,19 @@ ui_ok() {
     [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:2023/ 2>/dev/null)" = "200" ]
 }
 
-dae0_counters() {
+dae0_total() {
     rx=$(cat "$DAE0_STATS/rx_bytes" 2>/dev/null)
     tx=$(cat "$DAE0_STATS/tx_bytes" 2>/dev/null)
-    echo "${rx:-x}:${tx:-x}"
+    echo $(( ${rx:-0} + ${tx:-0} ))
 }
 
 # 0 when dae0 carried no traffic for IDLE_SAMPLES x IDLE_SAMPLE_SEC seconds.
-# When dae0 does not exist at all there is nothing in flight to protect either.
 dae0_idle() {
-    prev=$(dae0_counters)
+    prev=$(dae0_total)
     n=0
     while [ "$n" -lt "$IDLE_SAMPLES" ]; do
         sleep "$IDLE_SAMPLE_SEC"
-        cur=$(dae0_counters)
+        cur=$(dae0_total)
         [ "$cur" != "$prev" ] && return 1
         prev="$cur"
         n=$((n + 1))
@@ -120,30 +137,16 @@ dae0_idle() {
     return 0
 }
 
-# Interfaces that currently carry a default route. Android's netd keeps the
-# per-network default route in its own table, so the main table is not enough.
-# This mirrors what dae itself uses to pick its WAN interfaces.
-default_ifaces() {
-    ip route show table all 2>/dev/null | grep '^default' \
-        | sed -n 's/.*dev \([a-zA-Z0-9_.-]*\).*/\1/p' | sort -u
+iface_up() {
+    [ -e "/sys/class/net/$1" ] || return 1
+    [ "$(cat /sys/class/net/$1/operstate 2>/dev/null)" = "up" ]
 }
 
-# Interfaces the last control-plane build bound as WAN. Each build logs
-# "Health check will only verify ..." right before a contiguous block of
-# "Bind to LAN/WAN: <iface>" lines, so the last such line is a reliable
-# generation boundary.
-bound_wan_ifaces() {
-    hc=$(grep -n 'Health check will only verify' "$LOG" 2>/dev/null | tail -1 | cut -d: -f1)
-    [ -n "$hc" ] || return 0
-    tail -n +"$hc" "$LOG" 2>/dev/null | grep 'Bind to WAN' \
-        | sed 's/.*Bind to WAN: //' | tr -d '"' | sort -u
-}
-
-# True when this interface is named in one of the dae config's interface
-# lists (wan_interface / lan_interface, stored as JSON-ish text in daed's
-# sqlite database). The web UI writes those lists when you pick interfaces in
-# its selector; "auto" is not a name, so an interface shows up here only when
-# it was actually chosen.
+# True when this interface is named in one of the dae config's interface lists
+# (wan_interface / lan_interface, stored as JSON-ish text in daed's sqlite
+# database). The web UI writes those lists when you pick interfaces in its
+# selector; "auto" is not a name, so an interface shows up here only when it
+# was actually chosen.
 config_iface_listed() {
     [ -f "$DB" ] || return 1
     for k in $CONFIG_IFACE_KEYS; do
@@ -154,37 +157,60 @@ config_iface_listed() {
     return 1
 }
 
-# Default-route interfaces dae is not capturing and that are not ignored.
-uncovered_ifaces() {
-    bound_now=" $(bound_wan_ifaces | tr '\n' ' ') "
-    for d in $(default_ifaces); do
-        case "$bound_now" in
-            *" $d "*) continue ;;
-        esac
+# Probing while Wi-Fi is up but deliberately not proxied would report a dead
+# proxy that the user does not want anyway -- skip in that case.
+probe_eligible() {
+    for i in $WIFI_IFACES; do
         case " $IGNORE_IFACES " in
-            *" $d "*)
-                # Ignored by default, unless the config asks for it by hand.
-                config_iface_listed "$d" || continue
+            *" $i "*)
+                if iface_up "$i" && ! config_iface_listed "$i"; then
+                    return 1
+                fi
                 ;;
         esac
-        echo "$d"
     done
+    return 0
 }
 
-# Filter uncovered_ifaces down to the ones that stayed uncovered for at least
-# STALE_GRACE seconds (state kept in $UNCOVERED), so a route/Wi-Fi flap does
-# not trigger a restart.
-stale_ifaces() {
-    now=$(date +%s)
-    tmp="$UNCOVERED.new"
-    : >"$tmp" 2>/dev/null
-    for d in $(uncovered_ifaces); do
-        since=$(awk -v i="$d" '$1 == i { print $2; exit }' "$UNCOVERED" 2>/dev/null)
-        [ -n "$since" ] || since=$now
-        printf '%s %s\n' "$d" "$since" >>"$tmp"
-        [ $((now - since)) -ge "$STALE_GRACE" ] && echo "$d"
-    done
-    mv "$tmp" "$UNCOVERED" 2>/dev/null
+resolve_ipv4() {
+    busybox nslookup "$1" 8.8.8.8 2>/dev/null | awk '
+        /^Name:/ { seen=1; next }
+        seen==1 && /^Address [0-9]+:/ {
+            for (i=3; i<=NF; i++)
+                if ($i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) { print $i; exit }
+        }'
+}
+
+# HTTP status of $3 fetched as uid 2000 with an explicit IP (uid 2000 cannot
+# use netd's resolver).
+http_code_as_shell() {
+    su 2000 -c "curl -s -m 12 -o /dev/null -w '%{http_code}' --resolve $1:443:$2 $3" 2>/dev/null
+}
+
+# 0 datapath ok, 1 datapath broken, 2 cannot tell (network down, no resolve).
+probe_datapath() {
+    cip=$(resolve_ipv4 "$CTRL_HOST")
+    [ -n "$cip" ] || return 2
+    ccode=$(http_code_as_shell "$CTRL_HOST" "$cip" "$CTRL_URL")
+    case "$ccode" in
+        2*|3*|4*) ;;
+        *) return 2 ;;   # uid 2000 has no usable network right now
+    esac
+
+    pip=$(resolve_ipv4 "$PROBE_HOST")
+    [ -n "$pip" ] || return 2
+    before=$(dae0_total)
+    pcode=$(http_code_as_shell "$PROBE_HOST" "$pip" "$PROBE_URL")
+    after=$(dae0_total)
+    moved=$(( after - before ))
+
+    if [ "$moved" -gt 0 ]; then
+        return 0                       # dae captured it
+    fi
+    if [ "$pcode" = "$PROBE_EXPECT" ]; then
+        return 1                       # worked, but bypassed dae
+    fi
+    return 1                           # blocked *and* bypassed dae
 }
 
 cooldown_ok() {
@@ -212,46 +238,68 @@ heal() {
     "$BIN_DIR/daed-stop" >>"$WLOG" 2>&1
     "$BIN_DIR/daed-start" >>"$WLOG" 2>&1
 
-    # Did it work? Staleness that survives a fresh start is not something a
-    # restart loop can fix (e.g. an interface dae never binds): back off.
     sleep 5
-    rm -f "$UNCOVERED" 2>/dev/null
-    if [ -n "$(uncovered_ifaces)" ]; then
-        log "repair did not clear:$(uncovered_ifaces | tr '\n' ' ') -- backing off ${BACKOFF}s"
-        echo $(( $(date +%s) + BACKOFF )) >"$BACKOFF_UNTIL" 2>/dev/null
-    else
+    if [ "$(probe_datapath; echo $?)" = "0" ]; then
         rm -f "$BACKOFF_UNTIL" 2>/dev/null
+        log "repair done: datapath ok (pid=$(daemon_pid))"
+    else
+        log "repair did not fix the probe -- backing off ${BACKOFF}s"
+        echo $(( $(date +%s) + BACKOFF )) >"$BACKOFF_UNTIL" 2>/dev/null
     fi
-    log "repair done: pid=$(daemon_pid) uncovered=[$(uncovered_ifaces | tr '\n' ' ')]"
 }
 
-log "watchdog started (interval=${WATCH_INTERVAL}s, cooldown=${HEAL_COOLDOWN}s, grace=${STALE_GRACE}s, backoff=${BACKOFF}s, ignore=[$IGNORE_IFACES], keys=[$CONFIG_IFACE_KEYS])"
+log "watchdog started (interval=${WATCH_INTERVAL}s, probe=${PROBE_INTERVAL}s, fails=${PROBE_FAILS}, cooldown=${HEAL_COOLDOWN}s, backoff=${BACKOFF}s, ignore=[$IGNORE_IFACES], marker=$([ -f "$MARKER" ] && echo present || echo absent))"
 for k in $CONFIG_IFACE_KEYS; do
     v=$(grep -a -o "$k:\"[^\"]*\"" "$DB" 2>/dev/null | tail -1)
     log "config: ${v:-$k=<not found>}"
 done
 
+probe_fails=0
+probe_announced=0
+last_probe=0
+
 while true; do
+    now=$(date +%s)
     if [ -f "$MARKER" ]; then
-        : # switched off by the user: stay out of the way
+        probe_fails=0   # switched off by the user: stay out of the way
     elif [ -z "$(daemon_pid)" ]; then
         heal "daemon not running"
+        probe_fails=0
     elif ! ui_ok; then
         heal "web UI not answering on 127.0.0.1:2023"
-    else
-        if in_backoff; then
-            : # a previous repair did not help; stay quiet until the deadline
+        probe_fails=0
+    elif in_backoff; then
+        :               # a previous repair did not help; stay quiet
+    elif [ $(( now - last_probe )) -ge "$PROBE_INTERVAL" ]; then
+        last_probe=$now
+        if probe_eligible; then
+            probe_datapath
+            rc=$?
+            case "$rc" in
+                0) if [ "$probe_fails" != "0" ]; then
+                       log "datapath probe recovered"
+                   elif [ "$probe_announced" != "1" ]; then
+                       log "datapath probe ok (traffic goes through dae)"
+                       probe_announced=1
+                   fi
+                   probe_fails=0 ;;
+                2) log "datapath probe inconclusive (network/resolve)" ;;
+                1) probe_fails=$(( probe_fails + 1 ))
+                   log "datapath probe failed (${probe_fails}/${PROBE_FAILS}): traffic is not going through dae"
+                   if [ "$probe_fails" -ge "$PROBE_FAILS" ]; then
+                       if ! cooldown_ok; then
+                           log "repair wanted but cooldown is active"
+                       elif dae0_idle; then
+                           heal "datapath probe failed ${probe_fails}x"
+                           probe_fails=0
+                       else
+                           log "repair wanted but traffic is flowing; deferring"
+                       fi
+                   fi ;;
+            esac
         else
-            stale=$(stale_ifaces)
-            if [ -n "$stale" ]; then
-                if ! cooldown_ok; then
-                    log "stale WAN binding:$(echo "$stale" | tr '\n' ' ') (cooldown active)"
-                elif dae0_idle; then
-                    heal "stale WAN binding:$(echo "$stale" | tr '\n' ' ')"
-                else
-                    log "stale WAN binding:$(echo "$stale" | tr '\n' ' ') but traffic is flowing; deferring"
-                fi
-            fi
+            log "probe skipped: Wi-Fi is up and not configured for proxying"
+            probe_fails=0
         fi
     fi
 

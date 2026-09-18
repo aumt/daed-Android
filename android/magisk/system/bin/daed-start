@@ -1,6 +1,5 @@
 #!/system/bin/sh
-# daed-start -- start the daed daemon (dae proxy + web UI) and report whether
-# the datapath looks sane.
+# daed-start -- start the daed daemon (dae proxy + web UI).
 #
 # Callers: service.sh (boot), the Quick-Settings tile (tap = on) and
 # daed-watchdog (repair). The daemon is started detached with setsid so it
@@ -14,10 +13,11 @@
 #      sending SIGUSR2 -- the same code path as the web UI's start button;
 #   4. make sure daed-watchdog is running, so a daemon started after boot is
 #      self-healed too;
-#   5. compare the interfaces dae bound as WAN against the interfaces that
-#      actually carry a default route, and warn when the binding is stale.
-#      (Repairing that is daed-watchdog's job; a fresh start normally gets it
-#      right, because the binding is computed once per control-plane build.)
+#   5. print the WAN binding vs. the interfaces carrying a default route when
+#      that can be read from the log. It often cannot: the Bind lines are
+#      info-level and the daemon rebuilds its logger from the user's log_level
+#      after the first reload (this device runs log_level=error). Whether the
+#      datapath actually works is decided by daed-watchdog's probe instead.
 #
 # Exit code 0 when the daemon is up and the web UI answers, 1 otherwise.
 
@@ -75,28 +75,31 @@ if [ -x "$WATCHDOG" ] && ! pgrep -f "daed-watchdog" >/dev/null 2>&1; then
     setsid "$WATCHDOG" >>"$WLOG" 2>&1 </dev/null &
 fi
 
-# (5) binding sanity report
+# (5) informational binding report, when the log happens to carry it
 HC=$(grep -n 'Health check will only verify' "$LOG" 2>/dev/null | tail -1 | cut -d: -f1)
 BOUND=""
 if [ -n "$HC" ]; then
     BOUND=$(tail -n +"$HC" "$LOG" 2>/dev/null | grep 'Bind to WAN' \
         | sed 's/.*Bind to WAN: //' | tr -d '"' | sort -u | tr '\n' ' ')
 fi
-DEFAULT_IFS=$(ip route show table all 2>/dev/null | grep '^default' \
-    | sed -n 's/.*dev \([a-zA-Z0-9_.-]*\).*/\1/p' | sort -u | tr '\n' ' ')
-echo "daed-start: default-route ifaces: [$DEFAULT_IFS]"
-echo "daed-start: bound WAN ifaces:     [$BOUND]"
-
-STALE=""
-for d in $DEFAULT_IFS; do
-    case " $BOUND " in
-        *" $d "*) ;;
-        *) STALE="$STALE $d" ;;
-    esac
-done
-if [ -n "$STALE" ]; then
-    echo "daed-start: WARNING not bound as WAN:$STALE"
-    log "WARN default-route iface(s) not bound as WAN:$STALE"
+if [ -z "$BOUND" ]; then
+    echo "daed-start: WAN binding unknown (Bind lines are info-level; log_level hides them)"
+else
+    DEFAULT_IFS=$(ip route show table all 2>/dev/null | grep '^default' \
+        | sed -n 's/.*dev \([a-zA-Z0-9_.-]*\).*/\1/p' | sort -u | tr '\n' ' ')
+    echo "daed-start: default-route ifaces: [$DEFAULT_IFS]"
+    echo "daed-start: bound WAN ifaces:     [$BOUND]"
+    STALE=""
+    for d in $DEFAULT_IFS; do
+        case " $BOUND " in
+            *" $d "*) ;;
+            *) STALE="$STALE $d" ;;
+        esac
+    done
+    if [ -n "$STALE" ]; then
+        echo "daed-start: note not bound as WAN:$STALE"
+        log "note default-route iface(s) not bound as WAN:$STALE"
+    fi
 fi
 
 exit 0
