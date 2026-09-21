@@ -111,7 +111,22 @@ done
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [watchdog] $*" >>"$WLOG" 2>/dev/null; }
 
-daemon_pid() { pgrep -x daed 2>/dev/null | head -1; }
+# List the daemon's pids by reading /proc/<pid>/comm.
+#
+# `pgrep -x daed` is not usable here: the busybox pgrep that Magisk puts first
+# in PATH compares the whole command line even with -x, so it never matches a
+# daemon started as "/data/adb/modules/daed/system/bin/daed run -c ...".
+# Every liveness test then answered "not running" while the daemon kept
+# proxying: the watchdog restarted a healthy daemon on every cooldown, and
+# daed-start was willing to start a second instance next to a live one
+# ("listen tcp 0.0.0.0:2023: bind: address already in use").
+dae_pids() {
+    for d in /proc/[0-9]*; do
+        [ "$(cat "$d/comm" 2>/dev/null)" = "daed" ] && echo "${d#/proc/}"
+    done
+}
+
+daemon_pid() { dae_pids | head -1; }
 
 ui_ok() {
     [ "$(curl -s -m 3 -o /dev/null -w '%{http_code}' http://127.0.0.1:2023/ 2>/dev/null)" = "200" ]
@@ -172,8 +187,44 @@ probe_eligible() {
     return 0
 }
 
+# Resolve $1 to an IPv4 address. 8.8.8.8 goes first because that lookup itself
+# travels through the proxy: a plausible answer is then also evidence that the
+# datapath is alive. When it fails -- which is what happens once the proxy is
+# broken, since 8.8.8.8 is only reachable through it -- the ISP resolver is
+# tried, so the probe can still separate "proxy broken" from "no network"
+# instead of giving up as inconclusive and repairing nothing.
+# RESOLVE_VIA records who answered: an address from a fallback resolver may be
+# poisoned (mainland) and must therefore not be used to accuse the datapath.
+RESOLVE_VIA=""
 resolve_ipv4() {
-    busybox nslookup "$1" 8.8.8.8 2>/dev/null | awk '
+    ip=$(resolve_with 8.8.8.8 "$1")
+    if [ -n "$ip" ]; then
+        RESOLVE_VIA=proxy
+        printf '%s' "$ip"
+        return 0
+    fi
+    ip=$(resolve_with 223.5.5.5 "$1")
+    if [ -n "$ip" ]; then
+        RESOLVE_VIA=fallback
+        printf '%s' "$ip"
+        return 0
+    fi
+    ip=$(resolve_with "" "$1")
+    if [ -n "$ip" ]; then
+        RESOLVE_VIA=fallback
+        printf '%s' "$ip"
+        return 0
+    fi
+    RESOLVE_VIA=""
+    return 1
+}
+
+resolve_with() {
+    if [ -n "$1" ]; then
+        busybox nslookup "$2" "$1" 2>/dev/null
+    else
+        busybox nslookup "$2" 2>/dev/null
+    fi | awk '
         /^Name:/ { seen=1; next }
         seen==1 && /^Address [0-9]+:/ {
             for (i=3; i<=NF; i++)
@@ -208,7 +259,15 @@ probe_datapath() {
         return 0                       # dae captured it
     fi
     if [ "$pcode" = "$PROBE_EXPECT" ]; then
-        return 1                       # worked, but bypassed dae
+        # The page loaded without a single byte crossing dae0. With an address
+        # obtained through the proxy, that means traffic bypassed dae -- the
+        # stale-binding failure this probe exists for. With an address from a
+        # fallback resolver it may just be mainland space that the routing
+        # rules send direct, so do not accuse the datapath of being broken.
+        if [ "$RESOLVE_VIA" = "proxy" ]; then
+            return 1
+        fi
+        return 2
     fi
     return 1                           # blocked *and* bypassed dae
 }

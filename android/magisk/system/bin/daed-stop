@@ -17,28 +17,43 @@ WLOG="$DIR/watchdog.log"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [daed-stop] $*" >>"$WLOG" 2>/dev/null; }
 
-if ! pgrep -x daed >/dev/null 2>&1; then
+# List the daemon's pids by reading /proc/<pid>/comm.
+#
+# `pgrep -x daed` is not usable here: the busybox pgrep that Magisk puts first
+# in PATH compares the whole command line even with -x, so it never matches a
+# daemon started as "/data/adb/modules/daed/system/bin/daed run -c ...".
+# Every liveness test then answered "not running" while the daemon kept
+# proxying: the watchdog restarted a healthy daemon on every cooldown, and
+# daed-start was willing to start a second instance next to a live one
+# ("listen tcp 0.0.0.0:2023: bind: address already in use").
+dae_pids() {
+    for d in /proc/[0-9]*; do
+        [ "$(cat "$d/comm" 2>/dev/null)" = "daed" ] && echo "${d#/proc/}"
+    done
+}
+
+if [ -z "$(dae_pids)" ]; then
     echo "daed-stop: daemon not running"
     touch "$MARKER" 2>/dev/null
     exit 0
 fi
 
 log "stopping daemon (SIGTERM)"
-pkill -15 -x daed
+for p in $(dae_pids); do kill -15 "$p" 2>/dev/null; done
 i=0
 while [ "$i" -lt 20 ]; do
-    pgrep -x daed >/dev/null 2>&1 || break
+    [ -z "$(dae_pids)" ] && break
     sleep 0.5
     i=$((i + 1))
 done
 
-if pgrep -x daed >/dev/null 2>&1; then
+if [ -n "$(dae_pids)" ]; then
     log "SIGTERM timed out; sending SIGKILL"
-    pkill -9 -x daed
+    for p in $(dae_pids); do kill -9 "$p" 2>/dev/null; done
     sleep 1
 fi
 
 touch "$MARKER" 2>/dev/null
-echo "daed-stop: stopped (marker written, daemon_alive=$(pgrep -x daed | wc -l))"
+echo "daed-stop: stopped (marker written, daemon_alive=$(dae_pids | wc -l))"
 log "stopped; marker written"
 exit 0

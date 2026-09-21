@@ -6,7 +6,7 @@
 # survives the caller: a su shell, a TileService thread, or a boot script.
 #
 # Startup procedure:
-#   1. refuse to start a second instance (pgrep -x daed);
+#   1. refuse to start a second instance (dae_pids, see below);
 #   2. wait for the web UI on 127.0.0.1:2023 (the daemon's readiness signal);
 #   3. if the proxy was deliberately stopped (marker file present, the daemon
 #      mirrors its DB "running" flag there at startup), report it and leave the
@@ -33,6 +33,21 @@ WLOG="$DIR/watchdog.log"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [daed-start] $*" >>"$WLOG" 2>/dev/null; }
 
+# List the daemon's pids by reading /proc/<pid>/comm.
+#
+# `pgrep -x daed` is not usable here: the busybox pgrep that Magisk puts first
+# in PATH compares the whole command line even with -x, so it never matches a
+# daemon started as "/data/adb/modules/daed/system/bin/daed run -c ...".
+# Every liveness test then answered "not running" while the daemon kept
+# proxying: the watchdog restarted a healthy daemon on every cooldown, and
+# daed-start was willing to start a second instance next to a live one
+# ("listen tcp 0.0.0.0:2023: bind: address already in use").
+dae_pids() {
+    for d in /proc/[0-9]*; do
+        [ "$(cat "$d/comm" 2>/dev/null)" = "daed" ] && echo "${d#/proc/}"
+    done
+}
+
 mkdir -p "$DIR" 2>/dev/null
 
 if [ ! -x "$BIN" ]; then
@@ -41,8 +56,8 @@ if [ ! -x "$BIN" ]; then
     exit 1
 fi
 
-if pgrep -x daed >/dev/null 2>&1; then
-    echo "daed-start: already running (pid $(pgrep -x daed | tr '\n' ' '))"
+if [ -n "$(dae_pids)" ]; then
+    echo "daed-start: already running (pid $(dae_pids | tr '\n' ' '))"
 else
     log "starting daemon"
     cd "$DIR" || exit 1
@@ -63,7 +78,7 @@ if [ "$code" != "200" ]; then
     log "FAILED web UI did not come up (last http_code=${code:-none})"
     exit 1
 fi
-echo "daed-start: daemon up (pid $(pgrep -x daed | tr '\n' ' ')), web UI http_code=$code"
+echo "daed-start: daemon up (pid $(dae_pids | tr '\n' ' ')), web UI http_code=$code"
 
 # (3) proxy stopped in the DB -> request run
 if [ -f "$MARKER" ]; then
