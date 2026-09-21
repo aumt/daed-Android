@@ -9,8 +9,11 @@
 #   1. refuse to start a second instance (pgrep -x daed);
 #   2. wait for the web UI on 127.0.0.1:2023 (the daemon's readiness signal);
 #   3. if the proxy was deliberately stopped (marker file present, the daemon
-#      mirrors its DB "running" flag there at startup), ask dae to run by
-#      sending SIGUSR2 -- the same code path as the web UI's start button;
+#      mirrors its DB "running" flag there at startup), report it and leave the
+#      run state alone. Resuming the proxy is the web UI's or the Quick-Settings
+#      tile's job: SIGUSR2 suspends dae and SIGUSR1 makes it rebuild an empty
+#      control plane, which is what used to produce a "daemon is up but nothing
+#      is proxied" datapath;
 #   4. make sure daed-watchdog is running, so a daemon started after boot is
 #      self-healed too;
 #   5. print the WAN binding vs. the interfaces carrying a default route when
@@ -64,8 +67,7 @@ echo "daed-start: daemon up (pid $(pgrep -x daed | tr '\n' ' ')), web UI http_co
 
 # (3) proxy stopped in the DB -> request run
 if [ -f "$MARKER" ]; then
-    log "proxy was stopped; requesting run (SIGUSR2)"
-    pkill -12 -x daed >/dev/null 2>&1
+    log "proxy stop marker present; run state is left to the web UI (signals would rebuild an empty control plane)"
     sleep 2
 fi
 
