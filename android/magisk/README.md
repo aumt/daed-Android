@@ -53,7 +53,7 @@ daed run -c /data/adb/daed
 ```
 
 - 监听地址：`http://127.0.0.1:2023`
-- 现在通过 `system/bin/daed-start` 启动：内置重复启动保护（`pgrep -x daed`），启动后还会校验 WAN 绑定是否正确；若磁贴里把 daed 关掉了（存在 `/data/adb/daed/.dae-stopped`），开机不会自动拉起
+- 现在通过 `system/bin/daed-start` 启动：内置重复启动保护（扫 `/proc/*/comm`，不用 `pgrep`），启动后检查 **dae 该绑的接口是否都挂着 dae 的 tc 钩子**（该绑哪些读自 `wing.db`：`wan_interface` 为 `auto` 时是"所有带默认路由的接口"，点名时只查点名的那些；缺失则重启一次 daemon）；若磁贴里把 daed 关掉了（存在 `/data/adb/daed/.dae-stopped`），开机不会自动拉起
 - 如需手动启动，可在终端执行：
 
 ```bash
@@ -92,15 +92,24 @@ su -c 'daed run -c /data/adb/daed &'
 - Bind 行是 **info 级**，daemon 首次 reload 后会按配置里的 `log_level` 重建 logger（本机是 `error`），这些行根本不会写进日志；
 - 有些网络直连也能打开被墙站点，此时“探测能通”并不代表代理在工作。
 
-所以改为**看效果**：以**非 root 的 uid（2000/shell）**访问一个被路由到代理的站点，同时观察 `dae0` 的收发计数 —— `dae0` 是所有被抓取流量必经的 veth：
+所以改为**看效果**：以**非 root 的 uid（2000/shell）**访问一个被路由到代理的站点，同时观察 `dae0` 的收发计数 —— `dae0` 是 dae 决定接管一个流时把它送进去的 veth：
 
 | 现象 | 结论 |
 | --- | --- |
-| 页面正常 + `dae0` 计数增长 | 数据面正常 |
-| 页面正常 + `dae0` 计数不动 | 流量绕过了 dae（绑定失效）→ 修复 |
-| 页面失败 + 对照请求（直连可达目标）正常 | 代理链路坏了 → 修复 |
+| 访问有响应 + `dae0` 计数增长 | 流被交给了 dae，数据面正常 |
+| 访问有响应 + `dae0` 计数不动 | 流在抓取点被直接放行（没被接管）→ 数据面失效 → 修复 |
+| 什么都不通 + `dae0` 计数不动 | 什么都没被抓取 → 数据面失效 → 修复 |
 
-（uid 0 被 Android 补丁豁免，所以探针必须用非 root uid；uid 2000 用不了 netd 的解析器，脚本自己用 8.8.8.8 解析后配 `--resolve`。）
+（uid 0 被 Android 补丁豁免，所以探针必须用非 root uid。）
+
+**探测目标用固定 IP，不用域名。** 域名得由 root shell 自己解析，而 root 被 dae 豁免、查询直连出墙，被墙域名
+拿回来的是**投毒地址**；投毒地址基本落在国内段，国内段按规则走**直连**，而直连的流在抓取点就被 `TC_ACT_OK`
+放行、根本不进 `dae0`（`tproxy.c`：`we don't save state for direct+mark==0`）。用域名探测，**数据面完全正常
+的机器也会被判成坏的**，然后被无谓重启。改用被墙域名的真实 IP（`PROBE_IPS`）后，“走代理”成为唯一可能：要么
+`dae0` 动，要么数据面真的坏了。`PROBE_IPS` 会老化 —— 若在确认正常的机器上开始持续失败，从可用解析器
+（走代理，或 DoH）重新取一份。
+
+对照目标 `CTRL_*` 仍然解析：用国内域名只为判断“uid 2000 到底有没有网”，它即便被投毒也仍是可达的国内地址。
 
 ### 安全阀
 
@@ -108,13 +117,14 @@ su -c 'daed run -c /data/adb/daed &'
 - **空闲门槛**：`dae0` 连续 `IDLE_SAMPLES × IDLE_SAMPLE_SEC`（默认 3×5s）没有流量才重启，不打断正在进行的下载；
 - **冷却**：两次修复至少间隔 `HEAL_COOLDOWN`（默认 600s）；
 - **事后校验 + 长退避**：修复后再探一次；若仍异常（例如节点本身挂了，重启治不了），退避 `BACKOFF`（默认 6h），不会反复重启；
-- **闸门（按默认路由判断）**：取当前所有带默认路由的接口（`ip route show table all`，排除 `dummy0` / `lo`）；
-  只要其中有**任意一个**出现在 dae 配置的接口列表里就照常探测，**全部都没出现**时才认为“当前没有东西
-  该被代理”而跳过。旧实现问的是“`wlan0` 是否 up 且未配置”——当上行切到 Wi-Fi、而 dae 的 tc/eBPF 钩子
-  还留在开机时解析出的移动数据接口上时，这个判据恰好跳过了它本该抓到的故障：代理已死，看门狗却从不
-  查看。“Wi-Fi 是 up 的”说明不了流量从哪个接口出去，默认路由才能。另：判据用 `ip route` 而不是
-  `operstate`，因为 Android 的 rmnet 接口在承载默认路由时报 `unknown`。想让 Wi-Fi 也走代理，在 WebUI
-  接口列表里勾选 `wlan0`（写进 `wing.db` 的 `wan_interface` / `lan_interface`）。
+- **闸门（按 dae 的绑定集合判断）**：取当前所有带默认路由的接口（`ip route show table all`，排除 `dummy0` / `lo`）；
+  只要其中有**任意一个**是 dae 该绑的（读 `wing.db` 的 `wan_interface`/`lan_interface`；`auto` = 所有带默认路由
+  的接口，此时必然放开）就照常探测，**全部都不是**时才认为”当前没有东西该被代理”而跳过。旧实现问的是
+  “`wlan0` 是否 up 且未配置”——当上行切到 Wi-Fi、而 dae 的 tc/eBPF 钩子还留在开机时解析出的移动数据接口上时，
+  这个判据恰好跳过了它本该抓到的故障：代理已死，看门狗却从不查看。”Wi-Fi 是 up 的”说明不了流量从哪个接口
+  出去，默认路由才能。另：判据用 `ip route` 而不是 `operstate`，因为 Android 的 rmnet 接口在承载默认路由时
+  报 `unknown`。想让 Wi-Fi 也走代理，在 WebUI 接口列表里勾选 `wlan0`（写进 `wing.db` 的 `wan_interface` /
+  `lan_interface`），或保持 `wan_interface: “auto”`。
 - **用户关闭期间**：`.dae-stopped` 标记存在时完全不动作。
 
 日志：`/data/adb/daed/watchdog.log`（每次探测结果与修复原因都在里面）。
@@ -133,8 +143,11 @@ IDLE_SAMPLES=3
 IDLE_SAMPLE_SEC=5
 NEVER_UPLINK_IFACES="dummy0 lo"
 CONFIG_IFACE_KEYS="wan_interface lan_interface"
-PROBE_HOST="www.gstatic.com"
+CONFIG_WAN_KEY="wan_interface"
+PROBE_IPS="142.251.34.67 142.250.185.78 172.217.163.46"
+PROBE_SNI="www.gstatic.com"
 PROBE_URL="https://www.gstatic.com/generate_204"
+PROBE_EXPECT="204"
 CTRL_HOST="www.baidu.com"
 CTRL_URL="https://www.baidu.com/"
 ```
@@ -143,9 +156,9 @@ CTRL_URL="https://www.baidu.com/"
 
 | 脚本 | 作用 |
 | --- | --- |
-| `system/bin/daed-start` | 启动 daemon（`setsid` 后台，含重复启动保护）、等待 WebUI 就绪、必要时开代理、确保看门狗在跑 |
+| `system/bin/daed-start` | 启动 daemon（`setsid` 后台，含重复启动保护）、等待 WebUI 就绪、必要时开代理、确保看门狗在跑、校验 dae 该绑的接口都有 tc 钩子（按 `wing.db` 的 `wan_interface`/`lan_interface` 判断，缺失则重启一次） |
 | `system/bin/daed-stop` | `SIGTERM` 优雅停止（超时 `SIGKILL`）并写入关闭标记 |
-| `system/bin/daed-watchdog` | 空闲时自愈：进程消失 / WAN 绑定失效 |
+| `system/bin/daed-watchdog` | 空闲时自愈：进程消失 / WebUI 无响应 / 数据面失效（`dae0` 判据） |
 | `system/bin/daed-open` | 打开 WebUI |
 
 磁贴点按时调用同一对 `daed-start` / `daed-stop`，因此手动点按与自动修复的行为完全一致。

@@ -26,20 +26,31 @@
 #     they disappear (log_level is "error" on this device).
 #   * "can I reach a blocked site" is not usable either: some networks do not
 #     block it, and then a dead proxy still looks healthy.
-#   So the probe measures the effect: fetch a page from a host that the
-#   routing rules send through the proxy, as a *non-root* uid, and watch dae0.
-#   dae0 is the veth every captured flow traverses, hence
-#       page loads, dae0 moved        -> datapath fine
-#       page loads, dae0 stayed at 0 -> traffic bypassed dae (stale binding)
-#       page fails, control request ok -> proxy path broken
+#   So the probe measures the effect: fetch a page from a host that the routing
+#   rules send through the proxy, as a *non-root* uid, and watch dae0. dae0 is
+#   the veth dae hands a flow to when it takes the flow over, hence
+#       page loads, dae0 moved     -> the flow was handed to dae
+#       nothing loads, dae0 at 0   -> nothing was captured: datapath broken
 #   uid 0 is exempted from dae by the Android patch, so the probe has to run as
-#   a non-root uid; uid 2000 (shell) is used and needs no resolver of its own -
-#   the IP is resolved here (via 8.8.8.8) and passed with --resolve.
+#   a non-root uid; uid 2000 (shell) is used and needs no resolver of its own.
+#
+# Why the probe targets are pinned addresses and not a host name:
+#   a name would have to be resolved by the root shell here, and root bypasses
+#   dae (uid 0 is exempt), so a blocked name comes back poisoned. A poisoned
+#   answer is normally mainland space, mainland space is routed direct, and a
+#   direct flow is passed through at the capture point without ever touching
+#   dae0 ("we don't save state for direct+mark==0", tproxy.c). Resolving would
+#   therefore make the probe read "dae0 did not move" on a datapath that works
+#   perfectly. With real addresses of a blocked host, "goes through the proxy"
+#   is the only possibility: either dae0 moves, or the datapath really is down.
+#   PROBE_IPS ages: if the probe starts failing on a datapath known to work,
+#   refresh the list from a working resolver (through the proxy, or DoH).
 #
 # Guard rails, so the cure is never worse than the disease:
 #   * repairs are skipped while the user switched the daemon off (marker file);
-#   * probing is skipped only while nothing that is currently an uplink is
-#     proxied (see NEVER_UPLINK_IFACES / CONFIG_IFACE_KEYS below);
+#   * probing is skipped only while dae is bound to nothing that is currently an
+#     uplink -- with wan_interface "auto" every current uplink is bound, so the
+#     probe always applies (see NEVER_UPLINK_IFACES / CONFIG_* below);
 #   * the probe must fail PROBE_FAILS times in a row before anything happens;
 #   * a repair waits until dae0 has carried no traffic for IDLE_SAMPLES x
 #     IDLE_SAMPLE_SEC seconds, so an in-flight download is not interrupted;
@@ -57,7 +68,9 @@
 #     IDLE_SAMPLE_SEC=5
 #     NEVER_UPLINK_IFACES="dummy0 lo"
 #     CONFIG_IFACE_KEYS="wan_interface lan_interface"
-#     PROBE_HOST="www.gstatic.com"
+#     CONFIG_WAN_KEY="wan_interface"
+#     PROBE_IPS="142.251.34.67 142.250.185.78 172.217.163.46"
+#     PROBE_SNI="www.gstatic.com"
 #     PROBE_URL="https://www.gstatic.com/generate_204"
 #     PROBE_EXPECT="204"
 #     CTRL_HOST="www.baidu.com"
@@ -90,11 +103,19 @@ IDLE_SAMPLE_SEC=5
 # that gate asked whether Wi-Fi was up, not whether anything was proxied.)
 NEVER_UPLINK_IFACES="dummy0 lo"
 CONFIG_IFACE_KEYS="wan_interface lan_interface"
+# The one key whose value dae expands: "auto" there means every up interface
+# with a default route (see config_binds_iface).
+CONFIG_WAN_KEY="wan_interface"
 # Probe targets: PROBE_* must be routed through the proxy, CTRL_* must work
 # without the proxy (used to tell "no network" from "proxy broken").
-PROBE_HOST="www.gstatic.com"
+# PROBE_IPS are real addresses of PROBE_SNI, pinned on purpose -- see the header.
+PROBE_IPS="142.251.34.67 142.250.185.78 172.217.163.46"
+PROBE_SNI="www.gstatic.com"
 PROBE_URL="https://www.gstatic.com/generate_204"
 PROBE_EXPECT="204"
+# CTRL_* is only used to tell "uid 2000 has no network at all" from "the proxy
+# path is broken", so it is the one target that may be resolved: a mainland name
+# stays reachable even when its answer is poisoned.
 CTRL_HOST="www.baidu.com"
 CTRL_URL="https://www.baidu.com/"
 [ -f "$CONF" ] && . "$CONF"
@@ -111,7 +132,7 @@ done
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [watchdog] $*" >>"$WLOG" 2>/dev/null; }
 
-# List the daemon's pids by reading /proc/<pid>/comm.
+# List the daemon's pids by reading /proc/<pid>/comm, skipping zombies.
 #
 # `pgrep -x daed` is not usable here: the busybox pgrep that Magisk puts first
 # in PATH compares the whole command line even with -x, so it never matches a
@@ -120,9 +141,21 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [watchdog] $*" >>"$WLOG" 2>/dev/null;
 # proxying: the watchdog restarted a healthy daemon on every cooldown, and
 # daed-start was willing to start a second instance next to a live one
 # ("listen tcp 0.0.0.0:2023: bind: address already in use").
+#
+# A zombie (state Z) has already exited -- only its exit status is left, for a
+# parent that may never collect it. Reporting it as a running daemon hides a
+# dead one, and the repair that follows (daed-stop + daed-start) then fails: the
+# start guard sees the corpse as "already running" and spawns nothing. stat reads
+# "pid (comm) state ...", so the state is the third token -- after the pid and the
+# parenthesized comm, which is a single word here ("daed") and splits cleanly.
+# Anything but an explicit Z counts as alive: a stat read that fails must not
+# make a running daemon invisible.
 dae_pids() {
     for d in /proc/[0-9]*; do
-        [ "$(cat "$d/comm" 2>/dev/null)" = "daed" ] && echo "${d#/proc/}"
+        [ "$(cat "$d/comm" 2>/dev/null)" = "daed" ] || continue
+        _dp_state=S
+        read -r _dp_id _dp_comm _dp_state _dp_rest <"$d/stat" 2>/dev/null
+        [ "$_dp_state" = "Z" ] || echo "${d#/proc/}"
     done
 }
 
@@ -152,17 +185,28 @@ dae0_idle() {
     return 0
 }
 
-# True when this interface is named in one of the dae config's interface lists
-# (wan_interface / lan_interface, stored as JSON-ish text in daed's sqlite
-# database). The web UI writes those lists when you pick interfaces in its
-# selector; "auto" is not a name, so an interface shows up here only when it
-# was actually chosen.
-config_iface_listed() {
+# Was dae told to bind $1? Read from daed's own configuration (the interface
+# lists in its sqlite database, key:"value" text), so the gate and daed agree on
+# what is proxied. Same rule as daed-start's must_be_hooked:
+#   * wan_interface "auto" means dae binds every interface that is up and carries
+#     a default route (common.GetDefaultIfnames) -- every current uplink is
+#     proxied, so the probe applies;
+#   * a named list binds exactly the names in it, and "auto" is not a name.
+# Reading it as "a name must appear" is not enough: with auto the lists name no
+# interface at all, and the gate would then close in the very situation it
+# exists for -- the uplink having moved to an interface the lists do not mention.
+config_binds_iface() {
     [ -f "$DB" ] || return 1
-    for k in $CONFIG_IFACE_KEYS; do
-        frag=$(grep -a -o "$k:\"[^\"]*\"" "$DB" 2>/dev/null | tail -1)
-        [ -n "$frag" ] || continue
-        printf '%s' "$frag" | grep -q "$1" && return 0
+    _cb_wan=$(grep -a -o "$CONFIG_WAN_KEY:\"[^\"]*\"" "$DB" 2>/dev/null | tail -1)
+    case "$_cb_wan" in
+        *auto*) return 0 ;;
+    esac
+    for _cb_k in $CONFIG_IFACE_KEYS; do
+        _cb_frag=$(grep -a -o "$_cb_k:\"[^\"]*\"" "$DB" 2>/dev/null | tail -1)
+        [ -n "$_cb_frag" ] || continue
+        case "$_cb_frag" in
+            *"$1"*) return 0 ;;
+        esac
     done
     return 1
 }
@@ -176,8 +220,7 @@ default_route_ifaces() {
         | sed -n 's/.*dev \([a-zA-Z0-9_.-]*\).*/\1/p' | sort -u
 }
 
-# Skipped only while the user proxies nothing that is currently an uplink: not
-# one of the interfaces carrying a default route is named in the dae config.
+# Skipped only while dae is bound to nothing that is currently an uplink.
 #
 # This used to read "wlan0 is up and not named in the config", on the assumption
 # that Wi-Fi is never a proxied uplink here. That skips the probe in exactly the
@@ -194,40 +237,35 @@ probe_eligible() {
         case " $NEVER_UPLINK_IFACES " in
             *" $i "*) continue ;;
         esac
-        config_iface_listed "$i" && return 0
+        config_binds_iface "$i" && return 0
     done
     return 1
 }
 
-# Resolve $1 to an IPv4 address. 8.8.8.8 goes first because that lookup itself
-# travels through the proxy: a plausible answer is then also evidence that the
-# datapath is alive. When it fails -- which is what happens once the proxy is
-# broken, since 8.8.8.8 is only reachable through it -- the ISP resolver is
-# tried, so the probe can still separate "proxy broken" from "no network"
-# instead of giving up as inconclusive and repairing nothing.
-# RESOLVE_VIA records who answered: an address from a fallback resolver may be
-# poisoned (mainland) and must therefore not be used to accuse the datapath.
-RESOLVE_VIA=""
+# Resolve $1 to an IPv4 address -- for the CTRL_* target only.
+#
+# These lookups run in the root shell, and root bypasses dae (uid 0 is exempt in
+# the Android patch), so the answer says nothing about the datapath. It is used
+# to get an address for the control fetch and for nothing else: a resolver
+# answer must never be part of a verdict. 8.8.8.8 goes first, the ISP resolver
+# and then the system resolver are the fallbacks, so the control fetch can still
+# be made once the proxy is down.
 resolve_ipv4() {
     ip=$(resolve_with 8.8.8.8 "$1")
     if [ -n "$ip" ]; then
-        RESOLVE_VIA=proxy
         printf '%s' "$ip"
         return 0
     fi
     ip=$(resolve_with 223.5.5.5 "$1")
     if [ -n "$ip" ]; then
-        RESOLVE_VIA=fallback
         printf '%s' "$ip"
         return 0
     fi
     ip=$(resolve_with "" "$1")
     if [ -n "$ip" ]; then
-        RESOLVE_VIA=fallback
         printf '%s' "$ip"
         return 0
     fi
-    RESOLVE_VIA=""
     return 1
 }
 
@@ -260,28 +298,31 @@ probe_datapath() {
         *) return 2 ;;   # uid 2000 has no usable network right now
     esac
 
-    pip=$(resolve_ipv4 "$PROBE_HOST")
-    [ -n "$pip" ] || return 2
-    before=$(dae0_total)
-    pcode=$(http_code_as_shell "$PROBE_HOST" "$pip" "$PROBE_URL")
-    after=$(dae0_total)
-    moved=$(( after - before ))
-
-    if [ "$moved" -gt 0 ]; then
-        return 0                       # dae captured it
-    fi
-    if [ "$pcode" = "$PROBE_EXPECT" ]; then
-        # The page loaded without a single byte crossing dae0. With an address
-        # obtained through the proxy, that means traffic bypassed dae -- the
-        # stale-binding failure this probe exists for. With an address from a
-        # fallback resolver it may just be mainland space that the routing
-        # rules send direct, so do not accuse the datapath of being broken.
-        if [ "$RESOLVE_VIA" = "proxy" ]; then
-            return 1
+    # Each candidate is a real address of PROBE_SNI (see the header), so unlike
+    # a resolved name it cannot land in mainland space and be routed direct. The
+    # first candidate whose flow reaches dae0 settles it.
+    _pd_served=""
+    for _pd_ip in $PROBE_IPS; do
+        _pd_before=$(dae0_total)
+        _pd_code=$(http_code_as_shell "$PROBE_SNI" "$_pd_ip" "$PROBE_URL")
+        _pd_after=$(dae0_total)
+        [ $(( _pd_after - _pd_before )) -gt 0 ] && return 0
+        if [ -z "$_pd_served" ] && [ "$_pd_code" = "$PROBE_EXPECT" ]; then
+            _pd_served="$_pd_ip"
         fi
-        return 2
+    done
+
+    if [ -n "$_pd_served" ]; then
+        # It answered without a single byte crossing dae0: the flow was passed
+        # through at the capture point instead of being handed to dae, i.e. it
+        # left by an interface dae does not hook -- the stale binding this probe
+        # exists for. A working datapath cannot produce this: these addresses are
+        # always proxied.
+        log "probe: $_pd_served served $PROBE_EXPECT yet dae0 stayed still (traffic bypassed dae)"
+        return 1
     fi
-    return 1                           # blocked *and* bypassed dae
+    log "probe: no candidate served $PROBE_EXPECT and dae0 stayed still (nothing captured)"
+    return 1
 }
 
 cooldown_ok() {
