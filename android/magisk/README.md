@@ -108,7 +108,13 @@ su -c 'daed run -c /data/adb/daed &'
 - **空闲门槛**：`dae0` 连续 `IDLE_SAMPLES × IDLE_SAMPLE_SEC`（默认 3×5s）没有流量才重启，不打断正在进行的下载；
 - **冷却**：两次修复至少间隔 `HEAL_COOLDOWN`（默认 600s）；
 - **事后校验 + 长退避**：修复后再探一次；若仍异常（例如节点本身挂了，重启治不了），退避 `BACKOFF`（默认 6h），不会反复重启；
-- **Wi-Fi 闸门**：当 `wlan0` 处于 up 且**没有**出现在 dae 配置的接口列表里时，说明你在用“不代理的 Wi-Fi”，此时不探测、不修复；想让 Wi-Fi 也走代理，就在 WebUI 接口列表里勾选 `wlan0`（会写进 `wing.db` 的 `wan_interface` / `lan_interface`），此后探针照常工作；
+- **闸门（按默认路由判断）**：取当前所有带默认路由的接口（`ip route show table all`，排除 `dummy0` / `lo`）；
+  只要其中有**任意一个**出现在 dae 配置的接口列表里就照常探测，**全部都没出现**时才认为“当前没有东西
+  该被代理”而跳过。旧实现问的是“`wlan0` 是否 up 且未配置”——当上行切到 Wi-Fi、而 dae 的 tc/eBPF 钩子
+  还留在开机时解析出的移动数据接口上时，这个判据恰好跳过了它本该抓到的故障：代理已死，看门狗却从不
+  查看。“Wi-Fi 是 up 的”说明不了流量从哪个接口出去，默认路由才能。另：判据用 `ip route` 而不是
+  `operstate`，因为 Android 的 rmnet 接口在承载默认路由时报 `unknown`。想让 Wi-Fi 也走代理，在 WebUI
+  接口列表里勾选 `wlan0`（写进 `wing.db` 的 `wan_interface` / `lan_interface`）。
 - **用户关闭期间**：`.dae-stopped` 标记存在时完全不动作。
 
 日志：`/data/adb/daed/watchdog.log`（每次探测结果与修复原因都在里面）。
@@ -125,8 +131,7 @@ HEAL_COOLDOWN=600
 BACKOFF=21600
 IDLE_SAMPLES=3
 IDLE_SAMPLE_SEC=5
-IGNORE_IFACES="wlan0"
-WIFI_IFACES="wlan0"
+NEVER_UPLINK_IFACES="dummy0 lo"
 CONFIG_IFACE_KEYS="wan_interface lan_interface"
 PROBE_HOST="www.gstatic.com"
 PROBE_URL="https://www.gstatic.com/generate_204"

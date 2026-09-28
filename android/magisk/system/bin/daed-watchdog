@@ -38,8 +38,8 @@
 #
 # Guard rails, so the cure is never worse than the disease:
 #   * repairs are skipped while the user switched the daemon off (marker file);
-#   * probing is skipped while Wi-Fi is up and intentionally not proxied (see
-#     IGNORE_IFACES / CONFIG_IFACE_KEYS below);
+#   * probing is skipped only while nothing that is currently an uplink is
+#     proxied (see NEVER_UPLINK_IFACES / CONFIG_IFACE_KEYS below);
 #   * the probe must fail PROBE_FAILS times in a row before anything happens;
 #   * a repair waits until dae0 has carried no traffic for IDLE_SAMPLES x
 #     IDLE_SAMPLE_SEC seconds, so an in-flight download is not interrupted;
@@ -55,8 +55,7 @@
 #     BACKOFF=21600
 #     IDLE_SAMPLES=3
 #     IDLE_SAMPLE_SEC=5
-#     IGNORE_IFACES="wlan0"
-#     WIFI_IFACES="wlan0"
+#     NEVER_UPLINK_IFACES="dummy0 lo"
 #     CONFIG_IFACE_KEYS="wan_interface lan_interface"
 #     PROBE_HOST="www.gstatic.com"
 #     PROBE_URL="https://www.gstatic.com/generate_204"
@@ -84,11 +83,12 @@ HEAL_COOLDOWN=600
 BACKOFF=21600
 IDLE_SAMPLES=3
 IDLE_SAMPLE_SEC=5
-# Wi-Fi is normally not a proxied uplink here; an interface on this list is
-# ignored unless the dae config names it (the occasional "also proxy Wi-Fi"
-# case, where you pick wlan0 in the web UI's interface list).
-IGNORE_IFACES="wlan0"
-WIFI_IFACES="wlan0"
+# Interfaces that are never an uplink, excluded when scanning for the ones
+# traffic can actually leave by. dummy0 is Android's always-present dummy
+# default route: counting it would make that scan always find "an uplink".
+# (An older conf may still set IGNORE_IFACES / WIFI_IFACES; both are gone --
+# that gate asked whether Wi-Fi was up, not whether anything was proxied.)
+NEVER_UPLINK_IFACES="dummy0 lo"
 CONFIG_IFACE_KEYS="wan_interface lan_interface"
 # Probe targets: PROBE_* must be routed through the proxy, CTRL_* must work
 # without the proxy (used to tell "no network" from "proxy broken").
@@ -152,11 +152,6 @@ dae0_idle() {
     return 0
 }
 
-iface_up() {
-    [ -e "/sys/class/net/$1" ] || return 1
-    [ "$(cat /sys/class/net/$1/operstate 2>/dev/null)" = "up" ]
-}
-
 # True when this interface is named in one of the dae config's interface lists
 # (wan_interface / lan_interface, stored as JSON-ish text in daed's sqlite
 # database). The web UI writes those lists when you pick interfaces in its
@@ -172,19 +167,36 @@ config_iface_listed() {
     return 1
 }
 
-# Probing while Wi-Fi is up but deliberately not proxied would report a dead
-# proxy that the user does not want anyway -- skip in that case.
+# Interfaces carrying a default route right now: the ones traffic can leave by.
+# operstate is not usable for this -- Android's rmnet interfaces report
+# "unknown" while carrying the default route -- so the routing table is what
+# gets read.
+default_route_ifaces() {
+    ip route show table all 2>/dev/null | grep '^default' \
+        | sed -n 's/.*dev \([a-zA-Z0-9_.-]*\).*/\1/p' | sort -u
+}
+
+# Skipped only while the user proxies nothing that is currently an uplink: not
+# one of the interfaces carrying a default route is named in the dae config.
+#
+# This used to read "wlan0 is up and not named in the config", on the assumption
+# that Wi-Fi is never a proxied uplink here. That skips the probe in exactly the
+# failure this watchdog exists for: the uplink moves to Wi-Fi while dae's tc/eBPF
+# hooks stay on the mobile interface it resolved once at startup, so the proxy
+# dies silently and the watchdog never looks. "Wi-Fi is up" says nothing about
+# which interface traffic leaves by; the default route does.
 probe_eligible() {
-    for i in $WIFI_IFACES; do
-        case " $IGNORE_IFACES " in
-            *" $i "*)
-                if iface_up "$i" && ! config_iface_listed "$i"; then
-                    return 1
-                fi
-                ;;
+    _uplinks=$(default_route_ifaces)
+    # No default route at all: there is no uplink to judge. Probe anyway, so the
+    # datapath is reported inconclusive instead of silently skipped.
+    [ -n "$_uplinks" ] || return 0
+    for i in $_uplinks; do
+        case " $NEVER_UPLINK_IFACES " in
+            *" $i "*) continue ;;
         esac
+        config_iface_listed "$i" && return 0
     done
-    return 0
+    return 1
 }
 
 # Resolve $1 to an IPv4 address. 8.8.8.8 goes first because that lookup itself
@@ -307,11 +319,12 @@ heal() {
     fi
 }
 
-log "watchdog started (interval=${WATCH_INTERVAL}s, probe=${PROBE_INTERVAL}s, fails=${PROBE_FAILS}, cooldown=${HEAL_COOLDOWN}s, backoff=${BACKOFF}s, ignore=[$IGNORE_IFACES], marker=$([ -f "$MARKER" ] && echo present || echo absent))"
+log "watchdog started (interval=${WATCH_INTERVAL}s, probe=${PROBE_INTERVAL}s, fails=${PROBE_FAILS}, cooldown=${HEAL_COOLDOWN}s, backoff=${BACKOFF}s, never-uplink=[$NEVER_UPLINK_IFACES], marker=$([ -f "$MARKER" ] && echo present || echo absent))"
 for k in $CONFIG_IFACE_KEYS; do
     v=$(grep -a -o "$k:\"[^\"]*\"" "$DB" 2>/dev/null | tail -1)
     log "config: ${v:-$k=<not found>}"
 done
+log "uplinks (default route): [$(printf '%s ' $(default_route_ifaces))]"
 
 probe_fails=0
 probe_announced=0
@@ -357,7 +370,8 @@ while true; do
                    fi ;;
             esac
         else
-            log "probe skipped: Wi-Fi is up and not configured for proxying"
+            _skipped_uplinks=$(printf '%s ' $(default_route_ifaces))
+            log "probe skipped: none of the current uplinks is proxied [$_skipped_uplinks]"
             probe_fails=0
         fi
     fi
