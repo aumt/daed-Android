@@ -16,9 +16,12 @@
 #      connections and can leave the daemon up with nothing proxied;
 #   4. make sure daed-watchdog is running, so a daemon started after boot is
 #      self-healed too;
-#   5. check that every interface dae was told to bind has its tc hooks, and
-#      restart the daemon once if one does not. dae resolves its WAN interface
-#      set once per control-plane build, so an uplink that appeared afterwards
+#   5. wait for every interface dae was told to bind to get its tc hooks, and
+#      restart the daemon once if they do not show up. dae attaches the hooks
+#      some seconds after it answers the web UI, so this waits rather than
+#      checking once (see wait_hooks).
+#      dae resolves its WAN interface set once per control-plane build, so an
+#      uplink that appeared afterwards
 #      -- Wi-Fi coming up after boot, Android re-creating the mobile-data
 #      interface and moving the default route with it -- is left without hooks:
 #      traffic leaving by it is never captured and the proxy dies silently
@@ -46,6 +49,21 @@ WLOG="$DIR/watchdog.log"
 # does bind it (it is up and has a default route), but nothing real leaves by
 # it, and a failure to attach there must not restart the daemon.
 NEVER_UPLINK_IFACES="dummy0 lo"
+
+# How long step (5) waits for dae to attach its tc hooks before it calls an
+# uplink unhooked: HOOK_POLL_TICKS polls HOOK_POLL_SEC apart. dae answers the
+# web UI well before it attaches anything -- on the reference device the UI was
+# up at ~1s while the hooks appeared 3-13s after the spawn (measured at boot:
+# hooks absent at the moment "daemon up" was logged, present 12s later, the
+# datapath already carrying traffic). Checking once, immediately after
+# wait_ui, therefore read a healthy boot as a fault: it restarted a working
+# daemon on every boot and then warned "still without dae hooks" about a
+# datapath that was fine seconds later. Poll up to HOOK_POLL_TICKS *
+# HOOK_POLL_SEC seconds instead -- 15 * 2 = 30s, comfortably past the ~13s
+# worst case seen, and still bounded so a real failure is reported at boot
+# rather than never.
+HOOK_POLL_TICKS=15
+HOOK_POLL_SEC=2
 
 # The interface lists in daed's sqlite DB, stored as key:"value" text like
 # everything else in it (e.g. log_level:"error"). Only wan_interface expands
@@ -149,6 +167,28 @@ unhooked_uplinks() {
     done
 }
 
+# Poll unhooked_uplinks until it comes back empty or the deadline passes.
+# Returns 0 when every required uplink is hooked, 1 when some are still not,
+# and leaves the last answer in HOOK_MISSING either way (empty on success).
+#
+# This is a wait, not a check, because the hooks are attached by the daemon
+# some seconds after it answers the web UI: reading the state once right after
+# wait_ui is reading it too early, and the cost of being wrong is a restarted
+# daemon plus a false warning on a datapath that was never broken. The wait is
+# bounded, so a daemon that genuinely cannot attach still gets its restart and
+# its warning -- just after the uplinks have had their chance.
+wait_hooks() {
+    HOOK_MISSING=""
+    _wh_i=0
+    while :; do
+        HOOK_MISSING=$(unhooked_uplinks)
+        [ -z "$HOOK_MISSING" ] && return 0
+        [ "$_wh_i" -ge "$HOOK_POLL_TICKS" ] && return 1
+        sleep "$HOOK_POLL_SEC"
+        _wh_i=$(( _wh_i + 1 ))
+    done
+}
+
 spawn_daemon() {
     log "starting daemon"
     cd "$DIR" || return 1
@@ -234,8 +274,7 @@ else
         echo "daed-start: no uplink of dae's to check right now"
         log "no current default-route interface is one dae binds; skipping the uplink hook check"
     else
-        MISSING=$(unhooked_uplinks)
-        if [ -z "$MISSING" ]; then
+        if wait_hooks; then
             echo "daed-start: uplinks all hooked [$(printf '%s ' $UPLINKS)]"
             log "uplinks all hooked [$(printf '%s ' $UPLINKS)]"
         else
@@ -243,19 +282,18 @@ else
             # loop: one restart, then either the uplinks are hooked or the
             # warning stands (a daemon that cannot attach there at all is not
             # helped by trying again).
-            echo "daed-start: uplink(s) without dae hooks:$MISSING -- restarting the daemon once"
-            log "uplink(s) without dae hooks:$MISSING -- restarting the daemon once"
+            echo "daed-start: uplink(s) without dae hooks after $((HOOK_POLL_TICKS * HOOK_POLL_SEC))s:$HOOK_MISSING -- restarting the daemon once"
+            log "uplink(s) without dae hooks after $((HOOK_POLL_TICKS * HOOK_POLL_SEC))s:$HOOK_MISSING -- restarting the daemon once"
             if stop_daemon_soft && spawn_daemon && wait_ui; then
                 echo "daed-start: restarted (web UI http_code=$UI_CODE)"
                 log "restarted; web UI http_code=$UI_CODE"
                 UPLINKS=$(required_uplinks)
-                MISSING=$(unhooked_uplinks)
-                if [ -z "$MISSING" ]; then
+                if wait_hooks; then
                     echo "daed-start: uplinks all hooked after the restart [$(printf '%s ' $UPLINKS)]"
                     log "uplinks all hooked after the restart [$(printf '%s ' $UPLINKS)]"
                 else
-                    echo "daed-start: WARNING still without dae hooks after the restart:$MISSING" >&2
-                    log "WARNING still without dae hooks after the restart:$MISSING"
+                    echo "daed-start: WARNING still without dae hooks after the restart:$HOOK_MISSING" >&2
+                    log "WARNING still without dae hooks after the restart:$HOOK_MISSING"
                 fi
             else
                 echo "daed-start: FAILED restart did not bring the web UI up" >&2
