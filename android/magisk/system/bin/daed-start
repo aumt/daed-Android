@@ -17,9 +17,11 @@
 #   4. make sure daed-watchdog is running, so a daemon started after boot is
 #      self-healed too;
 #   5. wait for every interface dae was told to bind to get its tc hooks, and
-#      restart the daemon once if they do not show up. dae attaches the hooks
+#      restart the daemon once if they fail to show up. dae attaches the hooks
 #      some seconds after it answers the web UI, so this waits rather than
-#      checking once (see wait_hooks).
+#      checking once (see wait_hooks). A read that tc could not answer is
+#      reported and left alone instead of being turned into a restart (see
+#      dae_hooks).
 #      dae resolves its WAN interface set once per control-plane build, so an
 #      uplink that appeared afterwards
 #      -- Wi-Fi coming up after boot, Android re-creating the mobile-data
@@ -62,6 +64,13 @@ NEVER_UPLINK_IFACES="dummy0 lo"
 # HOOK_POLL_SEC seconds instead -- 15 * 2 = 30s, comfortably past the ~13s
 # worst case seen, and still bounded so a real failure is reported at boot
 # rather than never.
+#
+# Waiting only helps if the read being waited on means something, and it did
+# not: the 03:29 boot read four zeros for the full 30s on all four uplinks
+# while a tc dump taken in the same minute listed daed_lan_egress_l3 and
+# daed_wan_egress_l3 on every one of them. dae_hooks therefore reports whether
+# its read can be trusted at all, and wait_hooks returns 3 -- no restart --
+# when it cannot.
 HOOK_POLL_TICKS=15
 HOOK_POLL_SEC=2
 
@@ -114,13 +123,51 @@ default_route_ifaces() {
         | sed -n 's/.*dev \([a-zA-Z0-9_.-]*\).*/\1/p' | sort -u
 }
 
-# Number of dae tc-bpf filters attached to $1, ingress plus egress; non-zero
-# means traffic leaving by it is captured.
+# Read dae's tc-bpf filters on $1, ingress plus egress. The answer goes into
+# globals rather than on stdout, because "counted zero" and "could not read"
+# have to be told apart and the caller needs the evidence either way:
+#
+#   HOOK_N     daed_ filters found (ingress + egress)
+#   HOOK_RC    worst tc exit status -- a tc killed by boot-time memory pressure
+#              shows up here as 128+
+#   HOOK_ERR   first line tc wrote to stderr (empty when it stayed quiet)
+#   HOOK_LINES non-empty lines tc printed
+#
+# Returns 0 when the read can be trusted, 1 when $1 does not exist, 2 when it
+# cannot be trusted. A non-zero HOOK_N means traffic leaving by it is captured.
+#
+# Why a zero needs a verdict attached to it: this check exists to notice an
+# uplink dae failed to hook, so its whole value is the zero -- but a zero has
+# three sources, and 2>/dev/null used to hide the difference. Measured on the
+# device (2026-09-28, Android 16, kernel 6.12.38, iproute2-ss171113):
+#   * nothing attached: tc prints nothing and exits 0. The honest zero; an
+#     interface with no qdisc reports the same way on this tc.
+#   * filters attached: two lines per filter, the daed_ name on the second. So
+#     lines without a daed_ name mean the name lookup failed, not that the
+#     hooks are gone -- the name is a separate query from the dump itself.
+#   * tc itself failed: silent as well, with 128+ or a stderr line to show it.
+# Only the first is a fact about the uplink; the other two are facts about tc,
+# and reading them as "restart the daemon" costs a healthy daemon (in-flight
+# connections dropped, 120MB of eBPF reloaded) plus a false WARNING.
 dae_hooks() {
     [ -e "/sys/class/net/$1" ] || return 1
-    _dh_i=$(tc filter show dev "$1" ingress 2>/dev/null | grep -c daed_)
-    _dh_e=$(tc filter show dev "$1" egress 2>/dev/null | grep -c daed_)
-    echo $(( _dh_i + _dh_e ))
+    HOOK_N=0; HOOK_RC=0; HOOK_ERR=""; HOOK_LINES=0
+    _dh_errf="$DIR/.hook-err.$$"
+    for _dh_d in ingress egress; do
+        _dh_o=$(tc filter show dev "$1" "$_dh_d" 2>"$_dh_errf")
+        _dh_rc=$?
+        [ "$_dh_rc" -gt "$HOOK_RC" ] && HOOK_RC=$_dh_rc
+        if [ -z "$HOOK_ERR" ]; then
+            HOOK_ERR=$(head -1 "$_dh_errf" 2>/dev/null | tr -d '\r')
+        fi
+        HOOK_N=$(( HOOK_N + $(printf '%s\n' "$_dh_o" | grep -c daed_) ))
+        HOOK_LINES=$(( HOOK_LINES + $(printf '%s\n' "$_dh_o" | grep -c .) ))
+    done
+    rm -f "$_dh_errf" 2>/dev/null
+    [ -n "$HOOK_ERR" ] && return 2
+    [ "$HOOK_RC" -ne 0 ] && return 2
+    [ "$HOOK_LINES" -gt 0 ] && [ "$HOOK_N" -eq 0 ] && return 2
+    return 0
 }
 
 # Was dae told to bind $1? Read from daed's own configuration, so that the check
@@ -159,17 +206,41 @@ required_uplinks() {
 }
 
 # The ones among them that have no dae hook at all, i.e. the interfaces traffic
-# leaves by without being captured.
+# leaves by without being captured. Answers in globals, not on stdout: an
+# unreadable uplink has to be reported next to the answer, and a command
+# substitution would run this in a subshell and throw those assignments away.
+#
+#   HOOK_MISSING  uplinks read cleanly with no dae_ filter on them
+#   UNREADABLE    uplinks whose read could not be trusted (dae_hooks: 2)
+#   UNREAD_WHY    the evidence for those, for the log
 unhooked_uplinks() {
+    HOOK_MISSING=""
+    UNREADABLE=""
+    UNREAD_WHY=""
     for _uu_i in $(required_uplinks); do
-        _uu_n=$(dae_hooks "$_uu_i") || continue
-        [ "$_uu_n" = "0" ] && printf '%s ' "$_uu_i"
+        dae_hooks "$_uu_i"
+        _uu_rc=$?
+        case "$_uu_rc" in
+            1) continue ;;   # no such interface: not one dae can bind
+            2) UNREADABLE="$UNREADABLE$_uu_i "
+               UNREAD_WHY="$UNREAD_WHY$_uu_i[rc=$HOOK_RC lines=$HOOK_LINES${HOOK_ERR:+ err=[$HOOK_ERR]}] "
+               continue ;;
+        esac
+        [ "$HOOK_N" = "0" ] && HOOK_MISSING="$HOOK_MISSING$_uu_i "
     done
 }
 
-# Poll unhooked_uplinks until it comes back empty or the deadline passes.
-# Returns 0 when every required uplink is hooked, 1 when some are still not,
-# and leaves the last answer in HOOK_MISSING either way (empty on success).
+# Poll unhooked_uplinks until it comes back clean or the deadline passes.
+# Returns 0 when every required uplink is hooked, 1 when some were read cleanly
+# and have no hook, and 3 when the answer cannot be trusted (some uplink could
+# not be read -- see dae_hooks). HOOK_MISSING and UNREAD_WHY carry the last
+# answer in all three cases.
+#
+# 3 exists so the caller can tell "the uplinks are not hooked" from "tc would
+# not say". Only the first is worth restarting on. Polling runs to the deadline
+# either way, because a read that failed once (boot-time memory pressure) often
+# works again a second later -- the verdict comes from the last poll, not from
+# the first bad one.
 #
 # This is a wait, not a check, because the hooks are attached by the daemon
 # some seconds after it answers the web UI: reading the state once right after
@@ -179,11 +250,16 @@ unhooked_uplinks() {
 # its warning -- just after the uplinks have had their chance.
 wait_hooks() {
     HOOK_MISSING=""
+    UNREADABLE=""
+    UNREAD_WHY=""
     _wh_i=0
     while :; do
-        HOOK_MISSING=$(unhooked_uplinks)
-        [ -z "$HOOK_MISSING" ] && return 0
-        [ "$_wh_i" -ge "$HOOK_POLL_TICKS" ] && return 1
+        unhooked_uplinks
+        [ -z "$HOOK_MISSING" ] && [ -z "$UNREADABLE" ] && return 0
+        if [ "$_wh_i" -ge "$HOOK_POLL_TICKS" ]; then
+            [ -n "$UNREADABLE" ] && return 3
+            return 1
+        fi
         sleep "$HOOK_POLL_SEC"
         _wh_i=$(( _wh_i + 1 ))
     done
@@ -274,10 +350,20 @@ else
         echo "daed-start: no uplink of dae's to check right now"
         log "no current default-route interface is one dae binds; skipping the uplink hook check"
     else
-        if wait_hooks; then
+        wait_hooks
+        case $? in
+        0)
             echo "daed-start: uplinks all hooked [$(printf '%s ' $UPLINKS)]"
             log "uplinks all hooked [$(printf '%s ' $UPLINKS)]"
-        else
+            ;;
+        3)
+            # tc would not say whether the uplinks are hooked. Restarting on
+            # that would be a guess, and the guess is expensive when wrong, so
+            # report what tc actually did and leave the daemon alone.
+            echo "daed-start: cannot tell whether the uplinks are hooked after $((HOOK_POLL_TICKS * HOOK_POLL_SEC))s; unusable tc read(s):$UNREAD_WHY-- not restarting" >&2
+            log "cannot tell whether the uplinks are hooked after $((HOOK_POLL_TICKS * HOOK_POLL_SEC))s; unusable tc read(s):$UNREAD_WHY-- not restarting"
+            ;;
+        *)
             # Restarting re-resolves dae's interface set. Deliberately not a
             # loop: one restart, then either the uplinks are hooked or the
             # warning stands (a daemon that cannot attach there at all is not
@@ -288,19 +374,28 @@ else
                 echo "daed-start: restarted (web UI http_code=$UI_CODE)"
                 log "restarted; web UI http_code=$UI_CODE"
                 UPLINKS=$(required_uplinks)
-                if wait_hooks; then
+                wait_hooks
+                case $? in
+                0)
                     echo "daed-start: uplinks all hooked after the restart [$(printf '%s ' $UPLINKS)]"
                     log "uplinks all hooked after the restart [$(printf '%s ' $UPLINKS)]"
-                else
+                    ;;
+                3)
+                    echo "daed-start: cannot tell whether the uplinks are hooked after the restart; unusable tc read(s):$UNREAD_WHY-- not restarting again" >&2
+                    log "cannot tell whether the uplinks are hooked after the restart; unusable tc read(s):$UNREAD_WHY-- not restarting again"
+                    ;;
+                *)
                     echo "daed-start: WARNING still without dae hooks after the restart:$HOOK_MISSING" >&2
                     log "WARNING still without dae hooks after the restart:$HOOK_MISSING"
-                fi
+                    ;;
+                esac
             else
                 echo "daed-start: FAILED restart did not bring the web UI up" >&2
                 log "FAILED restart did not bring the web UI up (last http_code=${UI_CODE:-none})"
                 exit 1
             fi
-        fi
+            ;;
+        esac
     fi
 fi
 

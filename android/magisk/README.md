@@ -53,7 +53,7 @@ daed run -c /data/adb/daed
 ```
 
 - 监听地址：`http://127.0.0.1:2023`
-- 现在通过 `system/bin/daed-start` 启动：内置重复启动保护（扫 `/proc/*/comm`，不用 `pgrep`），启动后等待 **dae 该绑的接口都挂上 dae 的 tc 钩子**（该绑哪些读自 `wing.db`：`wan_interface` 为 `auto` 时是"所有带默认路由的接口"，点名时只查点名的那些；dae 是在 WebUI 就绪之后几秒才挂钩子的，所以要等——最多 30 秒，到点仍缺才重启一次 daemon）；若磁贴里把 daed 关掉了（存在 `/data/adb/daed/.dae-stopped`），开机不会自动拉起
+- 现在通过 `system/bin/daed-start` 启动：内置重复启动保护（扫 `/proc/*/comm`，不用 `pgrep`），启动后等待 **dae 该绑的接口都挂上 dae 的 tc 钩子**（该绑哪些读自 `wing.db`：`wan_interface` 为 `auto` 时是"所有带默认路由的接口"，点名时只查点名的那些；dae 是在 WebUI 就绪之后几秒才挂钩子的，所以要等——最多 30 秒，到点仍缺才重启一次 daemon。**"缺"必须是读得准的**：开机那阵内存紧张，`tc` 可能被信号杀掉、dump 被截断，或只 dump 出 filter 条目却查不到 `daed_` 名字，这三种都会读成 0，但它们是 `tc` 的问题、不是上行的事实——这时只把原始读数（退出码/行数/stderr）写进日志，**不重启**）；若磁贴里把 daed 关掉了（存在 `/data/adb/daed/.dae-stopped`），开机不会自动拉起
 - 如需手动启动，可在终端执行：
 
 ```bash
@@ -156,7 +156,7 @@ CTRL_URL="https://www.baidu.com/"
 
 | 脚本 | 作用 |
 | --- | --- |
-| `system/bin/daed-start` | 启动 daemon（`setsid` 后台，含重复启动保护）、等待 WebUI 就绪、必要时开代理、确保看门狗在跑、等待 dae 该绑的接口都挂上 tc 钩子（按 `wing.db` 的 `wan_interface`/`lan_interface` 判断，最多等 30 秒，仍缺则重启一次） |
+| `system/bin/daed-start` | 启动 daemon（`setsid` 后台，含重复启动保护）、等待 WebUI 就绪、必要时开代理、确保看门狗在跑、等待 dae 该绑的接口都挂上 tc 钩子（按 `wing.db` 的 `wan_interface`/`lan_interface` 判断，最多等 30 秒，仍缺则重启一次；若 `tc` 读数不可信——非 0 退出、有 stderr、或有 filter 条目却查不到 `daed_` 名字——则只记日志不重启） |
 | `system/bin/daed-stop` | `SIGTERM` 优雅停止（超时 `SIGKILL`）并写入关闭标记 |
 | `system/bin/daed-watchdog` | 空闲时自愈：进程消失 / WebUI 无响应 / 数据面失效（`dae0` 判据） |
 | `system/bin/daed-open` | 打开 WebUI |
