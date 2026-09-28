@@ -116,6 +116,11 @@ jobs:
         run: |
           git apply ../../patches/dae-default-ifnames-android.patch
 
+      - name: Apply Android eBPF verifier-log-buffer size fix to dae-core
+        working-directory: wing/dae-core
+        run: |
+          git apply ../../patches/dae-ebpf-logsize-android.patch
+
       - name: Build eBPF objects (arm64)
         working-directory: wing/dae-core
         run: |

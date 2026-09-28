@@ -1,0 +1,15 @@
+diff --git a/control/control_plane.go b/control/control_plane.go
+--- a/control/control_plane.go
++++ b/control/control_plane.go
+@@ -461,4 +461,11 @@ func newControlPlaneWithContextOptions(
++	// The verifier log buffer starts at cilium/ebpf's 64KiB minimum, which these
++	// routing programs fill within their first few thousand instructions. On
++	// kernels that turn the resulting ENOSPC into EFAULT once the log is full,
++	// cilium/ebpf discards the log and reports only its "hit verifier bug"
++	// template, hiding the real error. Start at 8MiB so the log survives to the
++	// failing instruction and the real verifier complaint reaches the log.
++	ProgramOptions.LogSizeStart = 8 << 20
+ 	if log.Level == logrus.PanicLevel {
+ 		ProgramOptions.LogLevel = ebpf.LogLevelBranch | ebpf.LogLevelStats
+ 		// ProgramOptions.LogLevel = ebpf.LogLevelInstruction | ebpf.LogLevelStats
+ 	}
