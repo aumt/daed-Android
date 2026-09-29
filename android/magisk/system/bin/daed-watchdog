@@ -56,7 +56,12 @@
 #     IDLE_SAMPLE_SEC seconds, so an in-flight download is not interrupted;
 #   * at least HEAL_COOLDOWN seconds between two repairs;
 #   * if a repair does not actually fix the probe, the watchdog backs off for
-#     BACKOFF seconds instead of retrying every HEAL_COOLDOWN.
+#     BACKOFF seconds instead of retrying every HEAL_COOLDOWN. The backoff is
+#     tied to the boot it was recorded on (see boot_ident), so a reboot clears
+#     it: after one, the state that verdict was about is gone -- interfaces and
+#     routes have been rebuilt, and a flash may have removed the very fault the
+#     repairs could not fix -- so staying quiet would only hide a datapath that
+#     is repairable again.
 #
 # Optional config: /data/adb/daed/watchdog.conf, plain KEY=VALUE lines, e.g.
 #     WATCH_INTERVAL=30
@@ -334,13 +339,26 @@ cooldown_ok() {
     [ $(( $(date +%s) - last )) -ge "$HEAL_COOLDOWN" ]
 }
 
+# Identity of the current boot, used to age out a backoff recorded before a
+# reboot. boot_id is the canonical identity, btime the fallback; the write side
+# calls this same function, so the two always agree on which source they used.
+boot_ident() {
+    _bi_id=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
+    [ -n "$_bi_id" ] || _bi_id=$(awk '/^btime/{print $2; exit}' /proc/stat 2>/dev/null)
+    printf '%s' "$_bi_id"
+}
+
 in_backoff() {
     [ -f "$BACKOFF_UNTIL" ] || return 1
-    until_ts=$(cat "$BACKOFF_UNTIL" 2>/dev/null)
-    case "$until_ts" in
+    read -r _ib_boot _ib_until <"$BACKOFF_UNTIL" 2>/dev/null
+    # Recorded on an earlier boot -- or in the format that predates the boot id,
+    # a bare epoch, which lands in the first field with the second left empty.
+    # Either way it was not a verdict about this boot.
+    [ "$_ib_boot" = "$(boot_ident)" ] || return 1
+    case "$_ib_until" in
         ""|*[!0-9]*) return 1 ;;
     esac
-    [ "$(date +%s)" -lt "$until_ts" ]
+    [ "$(date +%s)" -lt "$_ib_until" ]
 }
 
 heal() {
@@ -356,7 +374,7 @@ heal() {
         log "repair done: datapath ok (pid=$(daemon_pid))"
     else
         log "repair did not fix the probe -- backing off ${BACKOFF}s"
-        echo $(( $(date +%s) + BACKOFF )) >"$BACKOFF_UNTIL" 2>/dev/null
+        echo "$(boot_ident) $(( $(date +%s) + BACKOFF ))" >"$BACKOFF_UNTIL" 2>/dev/null
     fi
 }
 
