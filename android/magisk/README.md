@@ -125,7 +125,12 @@ su -c 'daed run -c /data/adb/daed &'
   出去，默认路由才能。另：判据用 `ip route` 而不是 `operstate`，因为 Android 的 rmnet 接口在承载默认路由时
   报 `unknown`。想让 Wi-Fi 也走代理，在 WebUI 接口列表里勾选 `wlan0`（写进 `wing.db` 的 `wan_interface` /
   `lan_interface`），或保持 `wan_interface: “auto”`。
-- **用户关闭期间**：`.dae-stopped` 标记存在时完全不动作。
+- **用户关闭期间**：`.dae-stopped` 标记存在时完全不动作。这条分支排在所有闸门（含退避）之前，所以
+  `daed-stop` 是**先写标记、再发信号**：反过来写就留下一段「daemon 已死、声明还没立起来」的窗口，
+  落在里面的 tick 会把用户刚关掉的 daemon 又拉起来（2026-09-29 实测 6 次，全部在点击后 6-18s，
+  原因是 `daemon not running` / `web UI not answering`，没有一次是真故障）。同理，修复流程
+  （`heal`）**不写**这个标记 —— 那不是用户关闭：写进去既会让这条分支永远命中，又会在启动失败时
+  让看门狗从此不再修这个 daemon；修复途中用户若点了关闭，标记出现即中止本次启动。
 
 日志：`/data/adb/daed/watchdog.log`（每次探测结果与修复原因都在里面）。
 
@@ -157,7 +162,7 @@ CTRL_URL="https://www.baidu.com/"
 | 脚本 | 作用 |
 | --- | --- |
 | `system/bin/daed-start` | 启动 daemon（`setsid` 后台，含重复启动保护）、等待 WebUI 就绪、必要时开代理、确保看门狗在跑、等待 dae 该绑的接口都挂上 tc 钩子（按 `wing.db` 的 `wan_interface`/`lan_interface` 判断，最多等 30 秒，仍缺则重启一次；若 `tc` 读数不可信——非 0 退出、有 stderr、或有 filter 条目却查不到 `daed_` 名字——则只记日志不重启） |
-| `system/bin/daed-stop` | `SIGTERM` 优雅停止（超时 `SIGKILL`）并写入关闭标记 |
+| `system/bin/daed-stop` | `SIGTERM` 优雅停止（超时 `SIGKILL`）；**先写关闭标记、再发信号**；停不下来（`SIGKILL` 后仍有进程）则撤销标记并退出 1 |
 | `system/bin/daed-watchdog` | 空闲时自愈：进程消失 / WebUI 无响应 / 数据面失效（`dae0` 判据） |
 | `system/bin/daed-open` | 打开 WebUI |
 

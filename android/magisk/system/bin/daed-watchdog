@@ -365,10 +365,34 @@ heal() {
     reason="$1"
     log "repair: $reason"
     date +%s >"$LASTHEAL" 2>/dev/null
-    "$BIN_DIR/daed-stop" >>"$WLOG" 2>&1
+
+    # The stop half of the restart must not claim a user stop. Without this the
+    # marker check below would fire on every repair -- daed-stop writes the
+    # marker first thing now -- and no repair would ever start a daemon again;
+    # and a marker left over from a repair that failed to start silenced this
+    # loop for good, its first branch being "switched off by the user".
+    DAED_STOP_NO_MARKER=1 "$BIN_DIR/daed-stop" >>"$WLOG" 2>&1
+
+    # The decision to repair was taken from a reading made before that stop ran,
+    # and the user may have tapped the tile off in the meantime -- daed-stop
+    # then writes the marker before it signals anything. Starting the daemon now
+    # would undo their stop, which is the bug this check exists for.
+    if [ -f "$MARKER" ]; then
+        log "repair aborted: switched off by the user"
+        return 0
+    fi
+
     "$BIN_DIR/daed-start" >>"$WLOG" 2>&1
 
     sleep 5
+    # And the same window on the way out: if daed was switched off during the
+    # repair, what the probe sees now is the user's doing, not a repair that
+    # failed. Recording a backoff here would take the blame for it and mute the
+    # next real repair for BACKOFF seconds.
+    if [ -f "$MARKER" ]; then
+        log "repair outcome: daemon was switched off during the repair"
+        return 0
+    fi
     if [ "$(probe_datapath; echo $?)" = "0" ]; then
         rm -f "$BACKOFF_UNTIL" 2>/dev/null
         log "repair done: datapath ok (pid=$(daemon_pid))"

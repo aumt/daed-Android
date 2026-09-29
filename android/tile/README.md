@@ -17,7 +17,7 @@
 
 - 磁贴通过 root（Magisk 超级用户授权，首次点按弹出授权框）执行 `su -c ...`
 - 开启：调用模块脚本 `system/bin/daed-start` → 以 `setsid` 拉起 daemon、等待 WebUI 就绪、必要时 `SIGUSR2` 开启代理、确保看门狗在跑，并校验 WAN 绑定是否覆盖当前默认路由网卡
-- 关闭：调用模块脚本 `system/bin/daed-stop` → `SIGTERM` 优雅退出（daed 自己拆掉 veth/eBPF），超时才 `SIGKILL`，并写入 `.dae-stopped` 标记
+- 关闭：调用模块脚本 `system/bin/daed-stop` → **先写 `.dae-stopped` 标记**，再 `SIGTERM` 优雅退出（daed 自己拆掉 veth/eBPF），超时才 `SIGKILL`；标记必须先行的原因见 `android/magisk/README.md` 的看门狗一节
 - 守护进程在跑、代理被 WebUI 停掉：磁贴只发 `SIGUSR2`（`pkill -12 -x daed`）重新开启代理，不重启进程
 - 代理状态：daed 写入/删除标记文件 `/data/adb/daed/.dae-stopped`，磁贴用 `test -f` 快速读取
 - 同样的修复也会由 `daed-watchdog` 自动执行（见 `android/magisk/README.md`）：守护进程消失，或 WAN 绑定失效且 `dae0` 无流量时，自动重启 daed

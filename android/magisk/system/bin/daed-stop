@@ -9,7 +9,27 @@
 # service.sh does not autostart the daemon on the next boot and daed-watchdog
 # leaves it alone. daed-start (and tapping the tile back on) clears it again.
 #
-# Exit code 0 when no daed process is left.
+# It goes down before the first signal, not after the last one. daed-watchdog
+# reads it on every tick and keeps quiet while it stands -- but its "daemon not
+# running" branch ignores every other gate, so writing the marker at the end
+# left a window as wide as the shutdown itself (SIGTERM gets up to 10s of grace,
+# plus a SIGKILL round) in which the daemon was already gone and the claim was
+# not standing yet. A tick landing in that window "repaired" a daemon the user
+# had just switched off. Measured on the reference device (2026-09-29): six such
+# revivals, each 6-18s after a tile tap, every one of them read as "daemon not
+# running"/"web UI not answering" in watchdog.log -- none was a real failure.
+#
+# DAED_STOP_NO_MARKER=1 stops the daemon without claiming a user stop. Repair
+# paths (daed-watchdog's heal) need the stop but must not write the marker: a
+# marker left behind by a repair whose start then failed silenced the watchdog
+# for good -- its first branch reads "switched off by the user", so nothing
+# would ever repair that daemon again. daed-start's stop_daemon_soft signals by
+# hand for the same reason. The two helpers ship in one module zip, so a
+# daed-watchdog that sets this always runs next to a daed-stop that honours it.
+#
+# Exit code 0 when no daed process is left, 1 when one survived the stop -- the
+# marker is then retracted, because "switched off" standing over a live daemon
+# would keep both service.sh and the watchdog out of the way.
 
 DIR="${DAED_DIR:-/data/adb/daed}"
 MARKER="$DIR/.dae-stopped"
@@ -26,15 +46,33 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [daed-stop] $*" >>"$WLOG" 2>/dev/null
 # proxying: the watchdog restarted a healthy daemon on every cooldown, and
 # daed-start was willing to start a second instance next to a live one
 # ("listen tcp 0.0.0.0:2023: bind: address already in use").
+#
+# Zombies are skipped, exactly as daed-watchdog's copy of this function does: a
+# process that has already exited is not a daemon, and counting it would make
+# the "did the stop fail?" verdict below wrong -- reporting a corpse as alive
+# retracts a marker the user's stop had legitimately written.
 dae_pids() {
     for d in /proc/[0-9]*; do
-        [ "$(cat "$d/comm" 2>/dev/null)" = "daed" ] && echo "${d#/proc/}"
+        [ "$(cat "$d/comm" 2>/dev/null)" = "daed" ] || continue
+        _dp_state=S
+        read -r _dp_id _dp_comm _dp_state _dp_rest <"$d/stat" 2>/dev/null
+        [ "$_dp_state" = "Z" ] || echo "${d#/proc/}"
     done
 }
 
+# Claim the stop before acting on it -- see the header for why the order is the
+# fix and not a detail.
+#
+# WRITTEN remembers that the marker is ours only when this invocation actually
+# created it: a marker that was already standing is the user's (or a proxy
+# paused from the web UI), and a failed stop below must not retract that.
+WRITTEN=0
+if [ -z "$DAED_STOP_NO_MARKER" ] && [ ! -f "$MARKER" ]; then
+    touch "$MARKER" 2>/dev/null && WRITTEN=1
+fi
+
 if [ -z "$(dae_pids)" ]; then
     echo "daed-stop: daemon not running"
-    touch "$MARKER" 2>/dev/null
     exit 0
 fi
 
@@ -53,7 +91,28 @@ if [ -n "$(dae_pids)" ]; then
     sleep 1
 fi
 
-touch "$MARKER" 2>/dev/null
-echo "daed-stop: stopped (marker written, daemon_alive=$(dae_pids | wc -l))"
-log "stopped; marker written"
+# The claim only stands if the daemon is really gone. A stop that failed -- a
+# wedged process that survived SIGKILL -- must not leave "switched off" behind:
+# that marker is what keeps daed-watchdog out of the way and makes service.sh
+# skip the autostart at the next boot, so a lying marker turns one failed stop
+# into a proxy that stays down until somebody notices. Retracting it hands the
+# daemon back to the watchdog, which is the thing that can still repair it.
+if [ -n "$(dae_pids)" ]; then
+    if [ "$WRITTEN" = "1" ]; then
+        rm -f "$MARKER" 2>/dev/null
+        log "FAILED: daemon survived SIGKILL; marker retracted"
+    else
+        log "FAILED: daemon survived SIGKILL (no marker of ours to retract)"
+    fi
+    echo "daed-stop: FAILED, $(dae_pids | wc -l) daemon process(es) still alive" >&2
+    exit 1
+fi
+
+if [ "$WRITTEN" = "1" ]; then
+    echo "daed-stop: stopped (marker written, daemon_alive=0)"
+    log "stopped; marker written"
+else
+    echo "daed-stop: stopped (marker left alone, daemon_alive=0)"
+    log "stopped; marker left alone"
+fi
 exit 0
