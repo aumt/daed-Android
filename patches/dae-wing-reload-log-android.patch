@@ -36,23 +36,26 @@ index 2ad7bfb..db998fd 100644
  }
  
 diff --git a/dae/run.go b/dae/run.go
-index 7e20f2d..1b6e66b 100644
+index 7e20f2d..22d7047 100644
 --- a/dae/run.go
 +++ b/dae/run.go
-@@ -124,6 +124,12 @@ loop:
+@@ -124,6 +124,15 @@ loop:
  				}()
  				<-readyChan
  				log.Warnln("[Reload] Finished")
 +				// The new control plane is serving and owns this logger object:
 +				// stop being verbose and obey the configured level. conf is the
 +				// config that actually took effect -- the old one again if the
-+				// reload was rolled back.
-+				log.SetLevel(conf.Global.LogLevel)
-+				logrus.SetLevel(conf.Global.LogLevel)
++				// reload was rolled back. An unparseable level is left alone;
++				// logger.SetLogger already fell back to info in that case.
++				if level, errParse := logrus.ParseLevel(conf.Global.LogLevel); errParse == nil {
++					log.SetLevel(level)
++					logrus.SetLevel(level)
++				}
  				/* dae-wing start */
  				chCallback <- errReload
  				/* dae-wing end */
-@@ -139,10 +145,28 @@ loop:
+@@ -139,10 +148,37 @@ loop:
  			newConf := newReloadMsg.Config
  			/* dae-wing end */
  			// New logger.
@@ -68,11 +71,15 @@ index 7e20f2d..1b6e66b 100644
 +			// the running plane obeys the user's level afterwards. A more
 +			// verbose current level (debug/trace) is kept, not lowered.
 +			buildLevel := newConf.Global.LogLevel
-+			if buildLevel < logrus.InfoLevel {
-+				buildLevel = logrus.InfoLevel
++			buildParsed, errParse := logrus.ParseLevel(buildLevel)
++			if errParse != nil {
++				buildParsed = logrus.InfoLevel
 +			}
-+			if cur := log.GetLevel(); cur > buildLevel {
-+				buildLevel = cur
++			if buildParsed < logrus.InfoLevel {
++				buildParsed = logrus.InfoLevel
++			}
++			if cur := log.GetLevel(); cur > buildParsed {
++				buildParsed = cur
 +			}
  			oldLogOutput := log.Out
  			log = logrus.New()
@@ -80,6 +87,11 @@ index 7e20f2d..1b6e66b 100644
 -			logger.SetLogger(logrus.StandardLogger(), newConf.Global.LogLevel, disableTimestamp, nil)
 +			logger.SetLogger(log, buildLevel, disableTimestamp, nil)
 +			logger.SetLogger(logrus.StandardLogger(), buildLevel, disableTimestamp, nil)
++			// logger.SetLogger takes the configured level (and falls back to
++			// info when it cannot parse it); raise both loggers to the rebuild
++			// window's floor/ceiling computed above.
++			log.SetLevel(buildParsed)
++			logrus.SetLevel(buildParsed)
  			log.SetOutput(oldLogOutput) // FIXME: THIS IS A HACK.
  			logrus.SetOutput(oldLogOutput)
  
