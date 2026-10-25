@@ -53,6 +53,16 @@ DB="$DIR/wing.db"
 MARKER="$DIR/.dae-stopped"
 WLOG="$DIR/watchdog.log"
 
+# tc: pin the platform binary instead of taking whatever PATH offers. KernelSU
+# and Magisk put their own bin dirs ahead of /system/bin, and the busybox tc
+# applet (/data/adb/ksu/bin/busybox) rejects the "ingress"/"egress" keyword:
+#   tc: invalid argument 'ingress' to 'command'
+# Measured on the OnePlus 2026-10-25: every boot then reported "cannot tell
+# whether the uplinks are hooked" for all uplinks after waiting the full 30s,
+# on a datapath that was working. /system/bin/tc answers the same query fine.
+TC=/system/bin/tc
+[ -x "$TC" ] || TC=$(command -v tc 2>/dev/null)
+
 # Interfaces that are never an uplink, excluded when checking whether every
 # uplink is hooked. dummy0 is Android's always-present dummy default route: dae
 # does bind it (it is up and has a default route), but nothing real leaves by
@@ -161,7 +171,7 @@ dae_hooks() {
     HOOK_N=0; HOOK_RC=0; HOOK_ERR=""; HOOK_LINES=0
     _dh_errf="$DIR/.hook-err.$$"
     for _dh_d in ingress egress; do
-        _dh_o=$(tc filter show dev "$1" "$_dh_d" 2>"$_dh_errf")
+        _dh_o=$("$TC" filter show dev "$1" "$_dh_d" 2>"$_dh_errf")
         _dh_rc=$?
         [ "$_dh_rc" -gt "$HOOK_RC" ] && HOOK_RC=$_dh_rc
         if [ -z "$HOOK_ERR" ]; then
@@ -426,7 +436,7 @@ fi
 # shutdown, so missing hooks are the expected state then, not a fault.
 if [ -f "$MARKER" ]; then
     log "proxy stop marker present; skipping the uplink hook check"
-elif ! command -v tc >/dev/null 2>&1; then
+elif [ -z "$TC" ]; then
     log "tc not available; skipping the uplink hook check"
 else
     UPLINKS=$(required_uplinks)

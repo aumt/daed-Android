@@ -20,13 +20,13 @@ index 2ad7bfb..db998fd 100644
  			return fmt.Errorf("%w; %v", err, err2)
  		}
 -		tx2.Commit()
-+		if err2 := tx2.Commit(); err2 != nil {
++		if err2 := tx2.Commit().Error; err2 != nil {
 +			return fmt.Errorf("%w; commit running=false: %v", err, err2)
 +		}
  		return err
  	}
 -	tx.Commit()
-+	if err := tx.Commit(); err != nil {
++	if err := tx.Commit().Error; err != nil {
 +		// Dropping this error left a failed write invisible: the daemon kept
 +		// serving the config it had just loaded while the DB still described
 +		// the previous state, and the only symptom appeared after a reboot.
