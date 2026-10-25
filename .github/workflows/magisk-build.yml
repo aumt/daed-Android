@@ -109,6 +109,17 @@ jobs:
         run: |
           git apply ../patches/dae-wing-proxy-toggle-android.patch
 
+      - name: Apply Android reload-logging and running-state fixes to dae-wing
+        working-directory: wing
+        run: |
+          # 1. The reload rebuild window is forced to info level, so a
+          #    configured log_level of "error"/"warn" no longer hides the
+          #    control-plane build lines; the level is tightened back once the
+          #    new plane serves.
+          # 2. restoreRunningState() no longer drops tx.Commit() errors, and the
+          #    failure is reported at Error level.
+          git apply ../patches/dae-wing-reload-log-android.patch
+
       - name: Apply Android uid-0 WAN egress exemption to dae-core
         working-directory: wing/dae-core
         run: |

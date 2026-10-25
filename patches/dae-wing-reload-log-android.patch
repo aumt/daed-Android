@@ -1,0 +1,85 @@
+diff --git a/cmd/run.go b/cmd/run.go
+index 2ad7bfb..db998fd 100644
+--- a/cmd/run.go
++++ b/cmd/run.go
+@@ -112,7 +112,11 @@ var (
+ 			}()
+ 			// Reload with running state.
+ 			if err := restoreRunningState(); err != nil {
+-				logrus.Warnln("Failed to restore last running state:", err)
++				// Error, not Warn: a failure here means the "last running"
++				// state was not written to the DB, so the next boot may come
++				// up with a different config than the one the user left
++				// behind -- silently, until it happens.
++				logrus.Errorln("Failed to restore last running state:", err)
+ 			}
+ 			// Sync the proxy-stopped marker so the Quick-Settings tile reports
+ 			// the right state after a reboot.
+@@ -192,10 +196,17 @@ func restoreRunningState() (err error) {
+ 			tx2.Rollback()
+ 			return fmt.Errorf("%w; %v", err, err2)
+ 		}
+-		tx2.Commit()
++		if err2 := tx2.Commit(); err2 != nil {
++			return fmt.Errorf("%w; commit running=false: %v", err, err2)
++		}
+ 		return err
+ 	}
+-	tx.Commit()
++	if err := tx.Commit(); err != nil {
++		// Dropping this error left a failed write invisible: the daemon kept
++		// serving the config it had just loaded while the DB still described
++		// the previous state, and the only symptom appeared after a reboot.
++		return fmt.Errorf("commit running state: %w", err)
++	}
+ 	return nil
+ }
+ 
+diff --git a/dae/run.go b/dae/run.go
+index 7e20f2d..1b6e66b 100644
+--- a/dae/run.go
++++ b/dae/run.go
+@@ -124,6 +124,12 @@ loop:
+ 				}()
+ 				<-readyChan
+ 				log.Warnln("[Reload] Finished")
++				// The new control plane is serving and owns this logger object:
++				// stop being verbose and obey the configured level. conf is the
++				// config that actually took effect -- the old one again if the
++				// reload was rolled back.
++				log.SetLevel(conf.Global.LogLevel)
++				logrus.SetLevel(conf.Global.LogLevel)
+ 				/* dae-wing start */
+ 				chCallback <- errReload
+ 				/* dae-wing end */
+@@ -139,10 +145,28 @@ loop:
+ 			newConf := newReloadMsg.Config
+ 			/* dae-wing end */
+ 			// New logger.
++			//
++			// The rebuild window is forced to at least info level: this logger
++			// is handed to the new control plane below, and creating it from
++			// the configured level first meant that log_level:"error" (or
++			// "warn") hid every build-time line -- "Routing match set len",
++			// the health-check outbound list, "Bind to WAN" -- which is exactly
++			// the evidence needed when the datapath quietly stops proxying. The
++			// level is tightened back to the configured one once the new plane
++			// is serving (see the nil branch); it is the same logger object, so
++			// the running plane obeys the user's level afterwards. A more
++			// verbose current level (debug/trace) is kept, not lowered.
++			buildLevel := newConf.Global.LogLevel
++			if buildLevel < logrus.InfoLevel {
++				buildLevel = logrus.InfoLevel
++			}
++			if cur := log.GetLevel(); cur > buildLevel {
++				buildLevel = cur
++			}
+ 			oldLogOutput := log.Out
+ 			log = logrus.New()
+-			logger.SetLogger(log, newConf.Global.LogLevel, disableTimestamp, nil)
+-			logger.SetLogger(logrus.StandardLogger(), newConf.Global.LogLevel, disableTimestamp, nil)
++			logger.SetLogger(log, buildLevel, disableTimestamp, nil)
++			logger.SetLogger(logrus.StandardLogger(), buildLevel, disableTimestamp, nil)
+ 			log.SetOutput(oldLogOutput) // FIXME: THIS IS A HACK.
+ 			logrus.SetOutput(oldLogOutput)
+ 

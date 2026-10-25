@@ -275,7 +275,20 @@ wait_hooks() {
 spawn_daemon() {
     log "starting daemon"
     cd "$DIR" || return 1
-    setsid "$BIN" run -c "$DIR" >>"$LOG" 2>&1 </dev/null &
+    # daed rotates this file itself (lumberjack, behind --logfile): the size is
+    # checked on every write, the full file is renamed to a timestamped backup
+    # and pruned to MaxBackups, and the log keeps appending across restarts.
+    # Without these flags the daemon appends forever -- at log_level "info"
+    # that is roughly 1MB a day of ordinary traffic.
+    #
+    # stdout/stderr deliberately go somewhere else: they carry what logrus does
+    # not -- Go panic traces above all -- and a panic trace written into the
+    # rotating file would be attached to the inode lumberjack renames away, then
+    # pruned. This file only grows when the process crashes or complains before
+    # logging is up.
+    setsid "$BIN" run -c "$DIR" \
+        --logfile "$LOG" --logfile-maxsize 8 --logfile-maxbackups 2 \
+        >>"$DIR/daed.stderr.log" 2>&1 </dev/null &
 }
 
 # Wait for the web UI on 127.0.0.1:2023, the daemon's readiness signal; UI_CODE

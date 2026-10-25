@@ -25,7 +25,7 @@ daed Android Magisk 模块版本，可在已 root 的 Android 设备上以 Magis
 - 二进制：`/data/adb/modules/daed/system/bin/daed`
 - 快捷跳转脚本：`/data/adb/modules/daed/system/bin/daed-open`
 - 磁贴系统应用：`/data/adb/modules/daed/system/app/DaedTile/DaedTile.apk`
-- 配置目录：`/data/adb/daed`（含 `wing.db` 数据库、`daed.log` 日志）
+- 配置目录：`/data/adb/daed`（含 `wing.db` 数据库、`daed.log` 日志）。`daed.log` 由 daemon 自己轮转（`--logfile-maxsize 8`、`--logfile-maxbackups 2`，轮转后的文件是 `daed-<时间戳>.log.gz`）；**panic 等非 logrus 输出另写到 `daed.stderr.log`**，这样崩溃栈不会被下一次轮转剪掉
 
 ## 🗂️ Geo 数据（geosite / geoip）
 
@@ -89,7 +89,7 @@ su -c 'daed run -c /data/adb/daed &'
 
 既不看日志里的 Bind 行，也不看“能不能打开被墙网站”：
 
-- Bind 行是 **info 级**，daemon 首次 reload 后会按配置里的 `log_level` 重建 logger（本机是 `error`），这些行根本不会写进日志；
+- Bind 行是 **info 级**，daemon 首次 reload 后会按配置里的 `log_level` 收紧 logger（本机是 `error`），所以**稳定运行期**这些行不会写进日志（`dae-wing-reload-log-android.patch` 只保证重建那一段是 info 级）；
 - 有些网络直连也能打开被墙站点，此时“探测能通”并不代表代理在工作。
 
 所以改为**看效果**：以**非 root 的 uid（2000/shell）**访问一个被路由到代理的站点，同时观察 `dae0` 的收发计数 —— `dae0` 是 dae 决定接管一个流时把它送进去的 veth：
