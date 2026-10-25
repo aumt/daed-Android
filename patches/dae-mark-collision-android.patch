@@ -1,0 +1,22 @@
+diff --git a/control/kern/tproxy.c b/control/kern/tproxy.c
+index 4525f17..9f89c0c 100644
+--- a/control/kern/tproxy.c
++++ b/control/kern/tproxy.c
+@@ -2612,7 +2612,16 @@ static __always_inline bool pid_is_control_plane(struct __sk_buff *skb,
+ 		*p = NULL;
+ 	if (PARAM.dae_socket_mark && skb->mark == PARAM.dae_socket_mark)
+ 		return true;
+-	if ((skb->mark & 0x100) == 0x100)
++	// Android: vendor QoS rules rewrite the fwmark of egress packets. Qualcomm
++	// netd's qcom_qos_filter_POSTROUTING sets the whole mark to 0x370 on
++	// rmnet_data*, which sets bit 0x100. The old heuristic below treated any
++	// mark with bit 0x100 as dae's own socket and returned TC_ACT_OK, so every
++	// user packet was silently classified as control-plane traffic and the
++	// datapath never proxied anything. dae's own sockets are already covered
++	// by cookie_pid_map and by the exact dae_socket_mark comparison above
++	// (ResolveSoMarkFromDae always yields a non-zero mark), so only keep the
++	// heuristic when no mark is configured at all.
++	if (!PARAM.dae_socket_mark && (skb->mark & 0x100) == 0x100)
+ 		return true;
+ 	return false;
+ }

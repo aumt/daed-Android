@@ -129,6 +129,23 @@ jobs:
         run: |
           git apply ../../patches/dae-ebpf-logsize-android.patch
 
+      - name: Apply Android vendor-mark collision fix to dae-core
+        working-directory: wing/dae-core
+        run: |
+          # Qualcomm qcom_qos_filter_POSTROUTING sets the egress fwmark to 0x370
+          # on rmnet_data*, which sets bit 0x100. pid_is_control_plane() used to
+          # treat that bit as "dae's own socket" and pass every user packet
+          # through unproxied.
+          git apply ../../patches/dae-mark-collision-android.patch
+
+      - name: Apply Android stale-plane nil-matcher fix to dae-core
+        working-directory: wing/dae-core
+        run: |
+          # UDP ingress tasks dispatched through package-level pools can outlive
+          # the plane that queued them; after a reload closes that plane its
+          # routing matcher is released and Match() used to panic the daemon.
+          git apply ../../patches/dae-reload-stale-plane-android.patch
+
       - name: Build eBPF objects (arm64)
         working-directory: wing/dae-core
         run: |

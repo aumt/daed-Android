@@ -1,0 +1,20 @@
+diff --git a/control/utils.go b/control/utils.go
+index b001f81..4293b86 100644
+--- a/control/utils.go
++++ b/control/utils.go
+@@ -23,6 +23,15 @@ import (
+ )
+ 
+ func (c *ControlPlane) Route(src, dst netip.AddrPort, domain string, l4proto consts.L4ProtoType, routingResult *bpfRoutingResult) (outboundIndex consts.OutboundIndex, mark uint32, must bool, err error) {
++	// A control plane that has been closed releases its generation state,
++	// including the userspace routing matcher. UDP ingress tasks are dispatched
++	// through package-level pools and can still re-enter handlePkt after their
++	// owning plane was retired by a reload, which used to crash the daemon with
++	// a nil-pointer dereference inside RoutingMatcher.Match. Refuse the lookup
++	// instead: those packets are already on their way out from the old plane.
++	if c == nil || c.routingMatcher == nil {
++		return 0, 0, false, stderrors.New("control plane is closing: userspace routing matcher is unavailable")
++	}
+ 	var ipVersion consts.IpVersionType
+ 	if dst.Addr().Is4() || dst.Addr().Is4In6() {
+ 		ipVersion = consts.IpVersion_4
